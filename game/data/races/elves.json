@@ -1,0 +1,793 @@
+{
+	"id": "elves",
+	"name": "Лесные эльфы",
+	"description": "Быстрые и меткие, но хрупкие. Дальнобойные стрелки, древни и магия природы.",
+	"units": {
+		"worker": {
+			"name": "Эльф-собиратель",
+			"role": "worker",
+			"level": 1,
+			"cost": {
+				"gold": 70,
+				"wood": 0
+			},
+			"supply": 1,
+			"build_time": 12,
+			"hp": 190,
+			"damage": 5,
+			"attack_cooldown": 1.5,
+			"range": 0.5,
+			"damage_type": "normal",
+			"armor": 0,
+			"armor_type": "medium",
+			"speed": 3.5,
+			"radius": 0.38,
+			"mana": 0,
+			"mana_regen": 0,
+			"model": {
+				"shape": "humanoid",
+				"scale": 0.86,
+				"bulk": 0.82,
+				"skin": "#ecc9a4",
+				"cloth": "#7fb05a",
+				"pants": "#5a4630",
+				"weapon": "pick",
+				"head": "none",
+				"hair": "#e8d27a",
+				"ears": true
+			},
+			"hotkey": "Q",
+			"carry_gold": 8,
+			"carry_wood": 14
+		},
+		"melee": {
+			"name": "Страж рощи",
+			"role": "melee",
+			"level": 2,
+			"cost": {
+				"gold": 125,
+				"wood": 10
+			},
+			"supply": 2,
+			"build_time": 18,
+			"hp": 440,
+			"damage": 15,
+			"attack_cooldown": 1.2,
+			"range": 0.8,
+			"damage_type": "normal",
+			"armor": 2,
+			"armor_type": "medium",
+			"speed": 3.4,
+			"radius": 0.43,
+			"mana": 0,
+			"mana_regen": 0,
+			"model": {
+				"shape": "humanoid",
+				"scale": 1.02,
+				"bulk": 0.92,
+				"skin": "#ecc9a4",
+				"cloth": "#3f8a5a",
+				"pants": "#3a4a3a",
+				"weapon": "spear",
+				"head": "circlet",
+				"hair": "#7a5230",
+				"ears": true,
+				"armored": true,
+				"shield": true
+			},
+			"hotkey": "Q"
+		},
+		"ranged": {
+			"name": "Следопыт",
+			"role": "ranged",
+			"level": 2,
+			"cost": {
+				"gold": 135,
+				"wood": 30
+			},
+			"supply": 2,
+			"build_time": 18,
+			"hp": 250,
+			"damage": 21,
+			"attack_cooldown": 1.4,
+			"range": 7.5,
+			"damage_type": "pierce",
+			"armor": 0,
+			"armor_type": "medium",
+			"speed": 3.3,
+			"radius": 0.4,
+			"mana": 0,
+			"mana_regen": 0,
+			"model": {
+				"shape": "humanoid",
+				"scale": 1.0,
+				"bulk": 0.84,
+				"skin": "#ecc9a4",
+				"cloth": "#2f6b4a",
+				"pants": "#4a3a26",
+				"weapon": "bow",
+				"head": "hood",
+				"ears": true,
+				"quiver": true
+			},
+			"hotkey": "E"
+		},
+		"heavy": {
+			"name": "Древень",
+			"role": "heavy",
+			"level": 3,
+			"cost": {
+				"gold": 235,
+				"wood": 100
+			},
+			"supply": 5,
+			"build_time": 36,
+			"hp": 1280,
+			"damage": 42,
+			"attack_cooldown": 2.0,
+			"range": 0.8,
+			"damage_type": "siege",
+			"armor": 4,
+			"armor_type": "heavy",
+			"speed": 2.5,
+			"radius": 0.85,
+			"mana": 0,
+			"mana_regen": 0,
+			"model": {
+				"shape": "humanoid",
+				"scale": 1.9,
+				"bulk": 1.6,
+				"skin": "#6a4a2e",
+				"cloth": "#5a4026",
+				"pants": "#4f3a22",
+				"weapon": "fists",
+				"head": "leaves",
+				"rocky": true
+			},
+			"hotkey": "R",
+			"tier": 2
+		},
+		"moon_priestess": {
+			"name": "Лунная жрица",
+			"role": "healer",
+			"level": 2,
+			"description": "Свет луны: сама лечит раненых союзников рядом, тратя ману (20 за лечение).",
+			"cost": {"gold": 135, "wood": 25},
+			"supply": 2,
+			"build_time": 22,
+			"hp": 290,
+			"damage": 10,
+			"attack_cooldown": 1.8,
+			"range": 6.0,
+			"damage_type": "magic",
+			"armor": 0,
+			"armor_type": "unarmored",
+			"speed": 3.4,
+			"radius": 0.4,
+			"mana": 180,
+			"mana_regen": 0.8,
+			"projectile": "magic",
+			"autocast": {"kind": "heal", "amount": 32, "mana": 20, "range": 6.5, "cooldown": 3.2, "color": "#9fe8ff"},
+			"model": {"shape": "humanoid", "scale": 1.0, "bulk": 0.8, "skin": "#ecc9a4", "cloth": "#6a7ad0", "pants": "#3a4a7a", "weapon": "staff", "head": "circlet", "hair": "#f1eee6", "ears": true, "robe": true, "orb": "#9fe8ff"},
+			"hotkey": "Q"
+		},
+		"dryad": {
+			"name": "Дриада",
+			"role": "elite",
+			"level": 3,
+			"description": "Быстрая лесная лучница: часто уворачивается от ударов.",
+			"cost": {"gold": 160, "wood": 50},
+			"supply": 3,
+			"build_time": 26,
+			"hp": 380,
+			"damage": 18,
+			"attack_cooldown": 1.1,
+			"range": 6.0,
+			"damage_type": "pierce",
+			"armor": 1,
+			"armor_type": "light",
+			"speed": 3.9,
+			"radius": 0.45,
+			"mana": 0,
+			"mana_regen": 0,
+			"evasion": 0.25,
+			"model": {"shape": "humanoid", "scale": 1.05, "bulk": 0.85, "skin": "#9fc27a", "cloth": "#5a8a3a", "pants": "#4a6a2a", "weapon": "bow", "head": "leaves", "ears": true, "quiver": true},
+			"hotkey": "E"
+		},
+		"ballista": {
+			"name": "Баллиста",
+			"role": "siege",
+			"level": 3,
+			"description": "Стреляет огромными копьями очень далеко и пробивает ряды врагов.",
+			"cost": {"gold": 210, "wood": 120},
+			"supply": 3,
+			"build_time": 33,
+			"hp": 480,
+			"damage": 62,
+			"attack_cooldown": 3.0,
+			"range": 10.5,
+			"damage_type": "siege",
+			"armor": 2,
+			"armor_type": "heavy",
+			"speed": 2.5,
+			"radius": 0.75,
+			"mana": 0,
+			"mana_regen": 0,
+			"splash_radius": 1.2,
+			"splash": 0.5,
+			"projectile": "arrow",
+			"model": {"shape": "engine", "engine": "ballista", "scale": 1.0, "wood": "#8a6a3a"},
+			"hotkey": "Q",
+			"tier": 2
+		},
+		"keeper": {
+			"name": "Хранительница рощи",
+			"role": "hero",
+			"hero": true,
+			"level": 5,
+			"description": "Стрелок-герой: бьёт по площади и обездвиживает опасных врагов.",
+			"cost": {
+				"gold": 430,
+				"wood": 110
+			},
+			"supply": 5,
+			"build_time": 55,
+			"hp": 700,
+			"damage": 30,
+			"attack_cooldown": 1.5,
+			"range": 7.0,
+			"damage_type": "pierce",
+			"armor": 2,
+			"armor_type": "hero",
+			"speed": 3.4,
+			"radius": 0.45,
+			"mana": 280,
+			"mana_regen": 1.0,
+			"hotkey": "Q",
+			"model": {
+				"shape": "humanoid",
+				"scale": 1.25,
+				"bulk": 0.88,
+				"skin": "#ecc9a4",
+				"cloth": "#2f8a6a",
+				"pants": "#2a4a3a",
+				"weapon": "bow",
+				"head": "circlet",
+				"hair": "#f1eee6",
+				"ears": true,
+				"cape": true,
+				"hero": true,
+				"quiver": true
+			},
+			"abilities": [
+				{
+					"key": "arrow_rain",
+					"name": "Град стрел",
+					"type": "active",
+					"hotkey": "Q",
+					"icon": "arrows",
+					"color": "#9fd65a",
+					"target": "point",
+					"mana": 85,
+					"cooldown": 10,
+					"range": 8.0,
+					"effect": {
+						"kind": "area_damage",
+						"center": "point",
+						"amount": 110,
+						"damage_type": "pierce",
+						"radius": 3.0
+					},
+					"description": "{amount} урона всем врагам в выбранной области."
+				},
+				{
+					"key": "roots",
+					"name": "Опутывающие корни",
+					"type": "active",
+					"hotkey": "E",
+					"icon": "leaf",
+					"color": "#5fae4a",
+					"target": "unit_enemy",
+					"mana": 70,
+					"cooldown": 12,
+					"range": 7.0,
+					"effect": {
+						"kind": "smite",
+						"amount": 60,
+						"damage_type": "magic",
+						"stun": 3.0
+					},
+					"description": "{amount} урона одному врагу и обездвиживание на {stun} с."
+				},
+				{
+					"key": "shadow_step",
+					"name": "Шаг тени",
+					"type": "active",
+					"hotkey": "R",
+					"icon": "blink",
+					"color": "#7a6aff",
+					"target": "point",
+					"mana": 50,
+					"cooldown": 12,
+					"range": 9.0,
+					"effect": {"kind": "blink"},
+					"description": "Мгновенно переносится в выбранную точку. С каждым рангом перезаряжается быстрее."
+				},
+				{
+					"key": "accuracy",
+					"name": "Аура меткости",
+					"type": "passive",
+					"icon": "aura",
+					"color": "#9fd65a",
+					"description": "Союзники в радиусе 7 наносят на {damage_mul%}% больше урона.",
+					"aura": {
+						"radius": 7.0,
+						"mods": {
+							"damage_mul": 1.1
+						}
+					}
+				},
+				{
+					"key": "starfall",
+					"name": "Звездопад",
+					"type": "active",
+					"ultimate": true,
+					"hotkey": "T",
+					"icon": "star",
+					"color": "#e8f0ff",
+					"target": "none",
+					"mana": 160,
+					"cooldown": 55,
+					"range": 0,
+					"effect": {"kind": "area_damage", "center": "self", "amount": 240, "damage_type": "magic", "radius": 6.5, "slow": 0.6, "duration": 4},
+					"description": "Звёзды падают вокруг: {amount} урона всем врагам рядом и замедление на {slow%}% на {duration} с."
+				}
+			],
+			"growth": {
+				"hp": 80,
+				"damage": 4,
+				"armor": 0.3,
+				"mana": 30,
+				"mana_regen": 0.06
+			}
+		},
+		"druid": {
+			"name": "Друид",
+			"role": "hero",
+			"hero": true,
+			"level": 5,
+			"description": "Целитель и призыватель: лечит войско и зовёт древней.",
+			"cost": {
+				"gold": 430,
+				"wood": 120
+			},
+			"supply": 5,
+			"build_time": 55,
+			"hp": 750,
+			"damage": 26,
+			"attack_cooldown": 1.8,
+			"range": 6.0,
+			"damage_type": "magic",
+			"armor": 2,
+			"armor_type": "hero",
+			"speed": 3.1,
+			"radius": 0.48,
+			"mana": 340,
+			"mana_regen": 1.2,
+			"hotkey": "E",
+			"model": {
+				"shape": "humanoid",
+				"scale": 1.25,
+				"bulk": 1.0,
+				"skin": "#ecc9a4",
+				"cloth": "#6a5a2e",
+				"pants": "#4a3a26",
+				"weapon": "staff",
+				"head": "antlers",
+				"hair": "#8a8a8a",
+				"ears": true,
+				"robe": true,
+				"hero": true,
+				"orb": "#8cff7a"
+			},
+			"abilities": [
+				{
+					"key": "healing_rain",
+					"name": "Исцеляющий дождь",
+					"type": "active",
+					"hotkey": "Q",
+					"icon": "heal",
+					"color": "#6dff9a",
+					"target": "none",
+					"mana": 90,
+					"cooldown": 14,
+					"range": 0,
+					"effect": {
+						"kind": "area_heal",
+						"amount": 160,
+						"radius": 5.0
+					},
+					"description": "Лечит всех союзников рядом на {amount} здоровья."
+				},
+				{
+					"key": "call_treant",
+					"name": "Призыв древня",
+					"type": "active",
+					"hotkey": "E",
+					"icon": "leaf",
+					"color": "#8a6a3a",
+					"target": "none",
+					"mana": 120,
+					"cooldown": 40,
+					"range": 0,
+					"effect": {
+						"kind": "summon",
+						"unit": "treant_spirit",
+						"count": 1,
+						"duration": 50
+					},
+					"description": "Призывает древней ({count}) на {duration} с."
+				},
+				{
+					"key": "thorns",
+					"name": "Шипастая кора",
+					"type": "active",
+					"hotkey": "R",
+					"icon": "thorns",
+					"color": "#a07a4a",
+					"target": "unit_ally",
+					"mana": 60,
+					"cooldown": 8,
+					"range": 7.0,
+					"effect": {"kind": "buff", "who": "target", "duration": 20, "mods": {"armor_add": 3, "thorns": 0.35}},
+					"description": "Союзник на {duration} с получает +{armor_add} брони и возвращает {thorns%}% урона тем, кто бьёт его вблизи."
+				},
+				{
+					"key": "life_aura",
+					"name": "Аура жизни",
+					"type": "passive",
+					"icon": "regen",
+					"color": "#6dff9a",
+					"description": "Союзники в радиусе 7 восстанавливают {hp_regen} здоровья в секунду.",
+					"aura": {
+						"radius": 7.0,
+						"mods": {
+							"hp_regen": 2.0
+						}
+					}
+				},
+				{
+					"key": "nature_wrath",
+					"name": "Гнев природы",
+					"type": "active",
+					"ultimate": true,
+					"hotkey": "T",
+					"icon": "roots",
+					"color": "#5fae4a",
+					"target": "point",
+					"mana": 150,
+					"cooldown": 60,
+					"range": 9.0,
+					"effect": {"kind": "area_damage", "center": "point", "amount": 150, "damage_type": "magic", "radius": 4.5, "stun": 3.0},
+					"description": "Корни вырываются из земли: {amount} урона врагам в области и обездвиживание на {stun} с."
+				}
+			],
+			"growth": {
+				"hp": 85,
+				"damage": 3,
+				"armor": 0.3,
+				"mana": 40,
+				"mana_regen": 0.08
+			},
+			"projectile": "magic"
+		},
+		"warden": {
+			"name": "Смотрительница",
+			"role": "hero",
+			"hero": true,
+			"level": 5,
+			"description": "Тихая убийца: веер клинков, мерцание и духи мщения.",
+			"cost": {"gold": 430, "wood": 110},
+			"supply": 5,
+			"build_time": 55,
+			"hp": 800, "damage": 34, "attack_cooldown": 1.3, "range": 0.8, "damage_type": "normal",
+			"armor": 3, "armor_type": "hero", "speed": 3.6, "radius": 0.45, "mana": 260, "mana_regen": 1.0,
+			"hotkey": "R",
+			"model": {"shape": "humanoid", "scale": 1.2, "bulk": 0.9, "skin": "#ecc9a4", "cloth": "#3a2a5a", "pants": "#2a1a3a", "weapon": "sword", "head": "hood", "ears": true, "cape": true, "hero": true},
+			"abilities": [
+				{"key": "fan_of_knives", "name": "Веер клинков", "type": "active", "hotkey": "Q", "icon": "blade", "color": "#c9ced6", "target": "none", "mana": 80, "cooldown": 9, "range": 0,
+					"effect": {"kind": "area_damage", "center": "self", "amount": 115, "damage_type": "pierce", "radius": 3.5}, "description": "{amount} урона всем врагам вокруг."},
+				{"key": "shadow_strike", "name": "Удар тени", "type": "active", "hotkey": "E", "icon": "fang", "color": "#6a5a9a", "target": "unit_enemy", "mana": 70, "cooldown": 8, "range": 6.0,
+					"effect": {"kind": "smite", "amount": 190, "damage_type": "magic", "stun": 0.6}, "description": "Отравленный кинжал: {amount} урона и короткое оглушение на {stun} с."},
+				{"key": "warden_blink", "name": "Мерцание", "type": "active", "hotkey": "R", "icon": "blink", "color": "#7a6aff", "target": "point", "mana": 50, "cooldown": 9, "range": 10.0,
+					"effect": {"kind": "blink"}, "description": "Мгновенно переносится в точку. С каждым рангом перезаряжается быстрее."},
+				{"key": "shadow_veil", "name": "Покров теней", "type": "passive", "icon": "cloak", "color": "#3a2a6a", "description": "{evasion%}% шанс увернуться от атаки.", "self_mods": {"evasion": 0.15}},
+				{"key": "vengeance", "name": "Духи мщения", "type": "active", "ultimate": true, "hotkey": "T", "icon": "skull", "color": "#9fe8ff", "target": "none", "mana": 160, "cooldown": 70, "range": 0,
+					"effect": {"kind": "summon", "unit": "vengeance_spirit", "count": 2, "duration": 40}, "description": "Призывает духов мщения ({count}) на {duration} с."}
+			],
+			"growth": {"hp": 85, "damage": 5, "armor": 0.4, "mana": 30, "mana_regen": 0.06}
+		},
+		"moon_queen": {
+			"name": "Королева луны",
+			"role": "hero",
+			"hero": true,
+			"level": 5,
+			"description": "Лучница под светом луны: обездвиживает, лечит и обрушивает лунный шторм.",
+			"cost": {"gold": 430, "wood": 110},
+			"supply": 5,
+			"build_time": 55,
+			"hp": 720, "damage": 32, "attack_cooldown": 1.4, "range": 7.0, "damage_type": "pierce",
+			"armor": 2, "armor_type": "hero", "speed": 3.5, "radius": 0.45, "mana": 300, "mana_regen": 1.1,
+			"hotkey": "T",
+			"model": {"shape": "humanoid", "scale": 1.25, "bulk": 0.85, "skin": "#ecc9a4", "cloth": "#5a6ad0", "pants": "#2a3a7a", "weapon": "bow", "head": "circlet", "hair": "#e8f0ff", "ears": true, "cape": true, "hero": true, "quiver": true},
+			"abilities": [
+				{"key": "moon_arrow", "name": "Лунная стрела", "type": "active", "hotkey": "Q", "icon": "arrows", "color": "#9fe8ff", "target": "unit_enemy", "mana": 70, "cooldown": 10, "range": 8.0,
+					"effect": {"kind": "smite", "amount": 120, "damage_type": "magic", "stun": 2.0}, "description": "{amount} урона и оглушение на {stun} с."},
+				{"key": "moonlight", "name": "Лунный свет", "type": "active", "hotkey": "E", "icon": "star", "color": "#cfe8ff", "target": "none", "mana": 90, "cooldown": 14, "range": 0,
+					"effect": {"kind": "area_heal", "amount": 150, "radius": 5.0}, "description": "Лечит всех союзников рядом на {amount} здоровья."},
+				{"key": "searing_arrows", "name": "Пылающие стрелы", "type": "active", "hotkey": "R", "icon": "fire", "color": "#ff7a2a", "target": "none", "mana": 60, "cooldown": 22, "range": 0,
+					"effect": {"kind": "buff", "who": "self", "duration": 15, "mods": {"damage_add": 15}}, "description": "{duration} с каждая стрела наносит +{damage_add} урона."},
+				{"key": "trueshot", "name": "Аура верного выстрела", "type": "passive", "icon": "aura", "color": "#9fe8ff", "description": "Союзники в радиусе 7 наносят на {damage_mul%}% больше урона.", "aura": {"radius": 7.0, "mods": {"damage_mul": 1.1}}},
+				{"key": "moon_storm", "name": "Лунный шторм", "type": "active", "ultimate": true, "hotkey": "T", "icon": "star", "color": "#e8f0ff", "target": "none", "mana": 170, "cooldown": 65, "range": 0,
+					"effect": {"kind": "area_damage", "center": "self", "amount": 230, "damage_type": "magic", "radius": 7.0, "slow": 0.5, "duration": 4}, "description": "{amount} урона всем врагам в большом радиусе и замедление на {slow%}% на {duration} с."}
+			],
+			"projectile": "arrow",
+			"growth": {"hp": 80, "damage": 4, "armor": 0.3, "mana": 30, "mana_regen": 0.07}
+		}
+	},
+	"summons": {
+		"vengeance_spirit": {"name": "Дух мщения", "role": "summon", "level": 3, "supply": 0, "hp": 520, "damage": 26, "attack_cooldown": 1.3, "range": 0.7, "damage_type": "magic", "armor": 1, "armor_type": "light", "speed": 3.8, "radius": 0.45, "mana": 0, "mana_regen": 0, "evasion": 0.2, "model": {"shape": "humanoid", "scale": 1.1, "bulk": 0.85, "skin": "#cfe8ff", "cloth": "#7a9ad0", "pants": "#5a7ab0", "weapon": "sword", "head": "hood", "robe": true, "glow": true}},
+		"treant_spirit": {
+			"name": "Призванный древень",
+			"role": "summon",
+			"level": 3,
+			"supply": 0,
+			"hp": 900,
+			"damage": 36,
+			"attack_cooldown": 1.9,
+			"range": 0.8,
+			"damage_type": "siege",
+			"armor": 3,
+			"armor_type": "heavy",
+			"speed": 2.8,
+			"radius": 0.8,
+			"mana": 0,
+			"mana_regen": 0,
+			"model": {
+				"shape": "humanoid",
+				"scale": 1.7,
+				"bulk": 1.5,
+				"skin": "#7a6a4a",
+				"cloth": "#5a4026",
+				"pants": "#4f3a22",
+				"weapon": "fists",
+				"head": "leaves",
+				"rocky": true,
+				"glow": true
+			}
+		}
+	},
+	"buildings": {
+		"supply": {
+			"name": "Лунный колодец",
+			"role": "supply",
+			"hotkey": "Q",
+			"cost": {
+				"gold": 90,
+				"wood": 40
+			},
+			"build_time": 25,
+			"hp": 450,
+			"armor": 4,
+			"armor_type": "fortified",
+			"size": 2,
+			"mana": 0,
+			"mana_regen": 0,
+			"model": {
+				"shape": "elf_well"
+			},
+			"supply_given": 8
+		},
+		"barracks": {
+			"name": "Зал охотников",
+			"role": "barracks",
+			"hotkey": "E",
+			"cost": {
+				"gold": 150,
+				"wood": 90
+			},
+			"build_time": 45,
+			"hp": 1100,
+			"armor": 4,
+			"armor_type": "fortified",
+			"size": 3,
+			"mana": 0,
+			"mana_regen": 0,
+			"model": {
+				"shape": "elf_lodge"
+			},
+			"trains": [
+				"melee",
+				"ranged",
+				"heavy"
+			]
+		},
+		"tower": {
+			"name": "Дозорное древо",
+			"role": "tower",
+			"hotkey": "R",
+			"cost": {
+				"gold": 100,
+				"wood": 110
+			},
+			"build_time": 40,
+			"hp": 450,
+			"armor": 4,
+			"armor_type": "fortified",
+			"size": 2,
+			"mana": 0,
+			"mana_regen": 0,
+			"model": {
+				"shape": "elf_watch"
+			},
+			"damage": 16,
+			"attack_cooldown": 0.8,
+			"range": 9.0,
+			"damage_type": "pierce"
+		},
+		"hall": {
+			"name": "Древо жизни",
+			"role": "hall",
+			"hotkey": "T",
+			"cost": {
+				"gold": 360,
+				"wood": 260
+			},
+			"build_time": 90,
+			"hp": 1600,
+			"armor": 4,
+			"armor_type": "fortified",
+			"size": 4,
+			"mana": 0,
+			"mana_regen": 0,
+			"model": {
+				"shape": "elf_tree"
+			},
+			"supply_given": 14,
+			"trains": [
+				"worker"
+			],
+			"researches": [
+				"tier"
+			]
+		},
+		"altar": {
+			"name": "Круг друидов",
+			"role": "altar",
+			"hotkey": "F",
+			"cost": {
+				"gold": 170,
+				"wood": 80
+			},
+			"build_time": 45,
+			"hp": 850,
+			"armor": 4,
+			"armor_type": "fortified",
+			"size": 3,
+			"mana": 0,
+			"mana_regen": 0,
+			"model": {
+				"shape": "elf_circle"
+			},
+			"trains": ["keeper", "druid", "warden", "moon_queen"]
+		},
+		"forge": {
+			"name": "Мастерская",
+			"role": "forge",
+			"hotkey": "G",
+			"cost": {
+				"gold": 130,
+				"wood": 90
+			},
+			"build_time": 40,
+			"hp": 850,
+			"armor": 4,
+			"armor_type": "fortified",
+			"size": 3,
+			"mana": 0,
+			"mana_regen": 0,
+			"model": {
+				"shape": "elf_forge"
+			},
+			"researches": [
+				"weapons",
+				"armor"
+			]
+		},
+		"temple": {
+			"name": "Святилище луны",
+			"role": "temple",
+			"hotkey": "V",
+			"cost": {"gold": 170, "wood": 90},
+			"build_time": 45,
+			"hp": 950,
+			"armor": 5,
+			"armor_type": "fortified",
+			"size": 3,
+			"mana": 0,
+			"mana_regen": 0,
+			"model": {"shape": "elf_shrine"},
+			"trains": ["moon_priestess", "dryad"]
+		},
+		"workshop": {
+			"name": "Мастерская древних",
+			"role": "workshop",
+			"hotkey": "B",
+			"cost": {"gold": 180, "wood": 160},
+			"build_time": 50,
+			"hp": 1000,
+			"armor": 5,
+			"armor_type": "fortified",
+			"size": 3,
+			"mana": 0,
+			"mana_regen": 0,
+			"model": {"shape": "elf_works"},
+			"trains": ["ballista"]
+		}
+	},
+	"upgrades": {
+		"weapons": {
+			"name": "Оружие",
+			"hotkey": "Q",
+			"icon": "blade",
+			"color": "#c9ced6",
+			"max": 3,
+			"cost": {
+				"gold": 150,
+				"wood": 75
+			},
+			"time": 40,
+			"mods": {
+				"damage_mul": 1.1
+			},
+			"description": "Все ваши юниты наносят на 10% больше урона за каждый уровень."
+		},
+		"armor": {
+			"name": "Доспехи",
+			"hotkey": "E",
+			"icon": "shield",
+			"color": "#8a7a5c",
+			"max": 3,
+			"cost": {
+				"gold": 150,
+				"wood": 100
+			},
+			"time": 40,
+			"mods": {
+				"armor_add": 1
+			},
+			"description": "Все ваши юниты получают +1 брони за каждый уровень."
+		},
+		"tier": {
+			"name": "Древо веков",
+			"hotkey": "E",
+			"icon": "aura",
+			"color": "#e0b84a",
+			"max": 1,
+			"cost": {
+				"gold": 310,
+				"wood": 260
+			},
+			"time": 70,
+			"mods": {},
+			"hall_hp": 500,
+			"description": "Второй уровень главного здания. Открывает юнита «Древень» и найм второго героя, главное здание получает +500 прочности."
+		}
+	},
+	"start": {
+		"hall": "hall",
+		"units": {
+			"worker": 8
+		}
+	}
+}

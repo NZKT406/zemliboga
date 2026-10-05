@@ -1,0 +1,195 @@
+{
+	"id": "undead",
+	"name": "Нежить",
+	"description": "Мертвецы не знают усталости: очень много здоровья, но мало урона. Святой урон для них особенно опасен.",
+	"units": {
+		"worker": {
+			"name": "Упырь-работник", "role": "worker", "level": 1, "undead": true,
+			"cost": {"gold": 75, "wood": 0}, "supply": 1, "build_time": 12,
+			"hp": 290, "damage": 5, "attack_cooldown": 1.5, "range": 0.5, "damage_type": "normal",
+			"armor": 0, "armor_type": "medium", "speed": 3.1, "radius": 0.4, "mana": 0, "mana_regen": 0,
+			"model": {"shape": "humanoid", "scale": 0.88, "bulk": 0.9, "skin": "#8a9a8a", "cloth": "#4a4a3a", "pants": "#3a3a2e", "weapon": "pick", "head": "bald"},
+			"hotkey": "Q", "carry_gold": 8, "carry_wood": 11
+		},
+		"melee": {
+			"name": "Гуль", "role": "melee", "level": 2, "undead": true,
+			"description": "Быстрый и живучий пожиратель трупов.",
+			"cost": {"gold": 120, "wood": 0}, "supply": 2, "build_time": 18,
+			"hp": 560, "damage": 11, "attack_cooldown": 1.0, "range": 0.5, "damage_type": "normal",
+			"armor": 1, "armor_type": "heavy", "speed": 3.5, "radius": 0.45, "mana": 0, "mana_regen": 0,
+			"model": {"shape": "humanoid", "scale": 0.95, "bulk": 1.0, "skin": "#7a8a7a", "cloth": "#3a3a34", "pants": "#2a2a24", "weapon": "fists", "head": "bald"},
+			"hotkey": "Q"
+		},
+		"ranged": {
+			"name": "Костяной лучник", "role": "ranged", "level": 2, "undead": true,
+			"cost": {"gold": 120, "wood": 15}, "supply": 2, "build_time": 18,
+			"hp": 330, "damage": 13, "attack_cooldown": 1.5, "range": 6.0, "damage_type": "pierce",
+			"armor": 0, "armor_type": "medium", "speed": 3.0, "radius": 0.4, "mana": 0, "mana_regen": 0,
+			"model": {"shape": "humanoid", "scale": 0.98, "bulk": 0.8, "skin": "#e0d9c4", "cloth": "#3a3440", "pants": "#d0c9b4", "weapon": "bow", "head": "none", "quiver": true},
+			"hotkey": "E"
+		},
+		"heavy": {
+			"name": "Мясник", "role": "heavy", "level": 3, "undead": true,
+			"description": "Сшитое из трупов чудовище: огромный запас здоровья и удары по площади.",
+			"cost": {"gold": 240, "wood": 60}, "supply": 4, "build_time": 32,
+			"hp": 1400, "damage": 30, "attack_cooldown": 1.9, "range": 0.8, "damage_type": "normal",
+			"armor": 3, "armor_type": "heavy", "speed": 2.8, "radius": 0.8, "mana": 0, "mana_regen": 0,
+			"splash_radius": 1.2, "splash": 0.4,
+			"model": {"shape": "humanoid", "scale": 1.6, "bulk": 1.9, "skin": "#9aaa8a", "cloth": "#5a3a3a", "pants": "#3a2a2a", "weapon": "club", "head": "bald", "ogre": true},
+			"hotkey": "R", "tier": 2
+		},
+		"dark_priest": {
+			"name": "Тёмный жрец", "role": "healer", "level": 2, "undead": true,
+			"description": "Тёмной силой сам латает раненых союзников рядом, тратя ману (25 за лечение).",
+			"cost": {"gold": 135, "wood": 20}, "supply": 2, "build_time": 22,
+			"hp": 360, "damage": 8, "attack_cooldown": 1.9, "range": 5.5, "damage_type": "magic",
+			"armor": 0, "armor_type": "unarmored", "speed": 3.0, "radius": 0.4, "mana": 190, "mana_regen": 0.75,
+			"projectile": "magic",
+			"autocast": {"kind": "heal", "amount": 38, "mana": 25, "range": 6.0, "cooldown": 3.5, "color": "#8aff6a"},
+			"model": {"shape": "humanoid", "scale": 0.98, "bulk": 0.85, "skin": "#c9d0b8", "cloth": "#2a2a34", "pants": "#1a1a22", "weapon": "staff", "head": "hood", "robe": true, "orb": "#8aff6a", "skull": true},
+			"hotkey": "Q"
+		},
+		"banshee": {
+			"name": "Банши", "role": "elite", "level": 3, "undead": true,
+			"description": "Призрак-плакальщица: уворачивается от ударов и пьёт жизнь врагов.",
+			"cost": {"gold": 160, "wood": 50}, "supply": 3, "build_time": 26,
+			"hp": 450, "damage": 15, "attack_cooldown": 1.4, "range": 5.5, "damage_type": "magic",
+			"armor": 0, "armor_type": "light", "speed": 3.6, "radius": 0.42, "mana": 0, "mana_regen": 0,
+			"evasion": 0.25, "lifesteal": 0.15, "projectile": "magic",
+			"model": {"shape": "humanoid", "scale": 1.05, "bulk": 0.8, "skin": "#d8e0e8", "cloth": "#8a96b0", "pants": "#6a7690", "weapon": "staff", "head": "hood", "robe": true, "orb": "#e8f0ff", "glow": true},
+			"hotkey": "E"
+		},
+		"necromancer": {
+			"name": "Некромант", "role": "summoner", "level": 3, "undead": true,
+			"description": "В бою сам поднимает скелетов-воинов (до двух сразу).",
+			"cost": {"gold": 150, "wood": 40}, "supply": 2, "build_time": 26,
+			"hp": 380, "damage": 10, "attack_cooldown": 1.8, "range": 5.5, "damage_type": "magic",
+			"armor": 0, "armor_type": "unarmored", "speed": 3.0, "radius": 0.42, "mana": 0, "mana_regen": 0,
+			"projectile": "magic",
+			"autocast": {"kind": "summon", "unit": "skeleton_warrior", "cooldown": 10, "max": 2, "duration": 40, "range": 8, "color": "#6aff8a"},
+			"model": {"shape": "humanoid", "scale": 1.05, "bulk": 0.85, "skin": "#c9d0b8", "cloth": "#1e1a24", "pants": "#141018", "weapon": "staff", "head": "wizard", "robe": true, "orb": "#6aff8a", "skull": true},
+			"hotkey": "R"
+		},
+		"plague_cart": {
+			"name": "Чумная телега", "role": "siege", "level": 3, "undead": true,
+			"description": "Метает сгустки чумы издалека; заражает всех рядом с целью.",
+			"cost": {"gold": 210, "wood": 110}, "supply": 3, "build_time": 34,
+			"hp": 640, "damage": 62, "attack_cooldown": 3.4, "range": 9.0, "damage_type": "siege",
+			"armor": 2, "armor_type": "heavy", "speed": 2.3, "radius": 0.75, "mana": 0, "mana_regen": 0,
+			"splash_radius": 2.0, "splash": 0.6, "projectile": "magic",
+			"model": {"shape": "engine", "engine": "catapult", "scale": 1.0, "wood": "#4a3a2e"},
+			"hotkey": "Q", "tier": 2
+		},
+		"death_lord": {
+			"name": "Рыцарь смерти", "role": "hero", "hero": true, "level": 5, "undead": true,
+			"description": "Тёмный паладин: разит лучом смерти и поднимает павших.",
+			"cost": {"gold": 425, "wood": 100}, "supply": 5, "build_time": 55,
+			"hp": 1150, "damage": 30, "attack_cooldown": 1.8, "range": 0.8, "damage_type": "normal",
+			"armor": 4, "armor_type": "hero", "speed": 3.6, "radius": 0.7, "mana": 260, "mana_regen": 0.9,
+			"hotkey": "Q",
+			"model": {"shape": "mounted", "scale": 1.05, "bulk": 1.2, "skin": "#b9c0b0", "cloth": "#2a2a34", "pants": "#1a1a22", "weapon": "sword", "head": "knight", "horse": "#2a2a2e", "armored": true, "cape": true, "hero": true},
+			"abilities": [
+				{"key": "death_coil", "name": "Лик смерти", "type": "active", "hotkey": "Q", "icon": "skull", "color": "#8aff6a", "target": "unit_enemy", "mana": 75, "cooldown": 7, "range": 7.5,
+					"effect": {"kind": "bolt", "amount": 170, "damage_type": "magic", "radius": 1.5, "splash": 0.3}, "description": "Сгусток смерти: {amount} урона цели."},
+				{"key": "unholy_haste", "name": "Нечестивое ускорение", "type": "active", "hotkey": "E", "icon": "boot", "color": "#6aff8a", "target": "none", "mana": 70, "cooldown": 20, "range": 0,
+					"effect": {"kind": "buff", "who": "area_allies", "radius": 7.0, "duration": 12, "mods": {"speed_mul": 1.25, "cooldown_mul": 0.85}}, "description": "Союзники рядом {duration} с бегут на {speed_mul%}% быстрее и атакуют на {cooldown_mul%}% чаще."},
+				{"key": "dark_shield", "name": "Тёмный щит", "type": "active", "hotkey": "R", "icon": "shield", "color": "#4a5a4a", "target": "none", "mana": 60, "cooldown": 18, "range": 0,
+					"effect": {"kind": "buff", "who": "self", "duration": 12, "mods": {"armor_add": 5, "lifesteal": 0.2}}, "description": "{duration} с: +{armor_add} брони и вампиризм {lifesteal%}%."},
+				{"key": "unholy_aura", "name": "Аура нечестивости", "type": "passive", "icon": "aura", "color": "#6aff8a", "description": "Союзники в радиусе 7 восстанавливают {hp_regen} здоровья в секунду и бегут на {speed_mul%}% быстрее.", "aura": {"radius": 7.0, "mods": {"hp_regen": 2.5, "speed_mul": 1.1}}},
+				{"key": "animate_dead", "name": "Поднятие мёртвых", "type": "active", "ultimate": true, "hotkey": "T", "icon": "skull", "color": "#6aff8a", "target": "none", "mana": 150, "cooldown": 65, "range": 0,
+					"effect": {"kind": "summon", "unit": "skeleton_warrior", "count": 4, "duration": 40}, "description": "Поднимает скелетов-воинов ({count}) на {duration} с."}
+			],
+			"growth": {"hp": 130, "damage": 4, "armor": 0.5, "mana": 25, "mana_regen": 0.05}
+		},
+		"lich": {
+			"name": "Лич", "role": "hero", "hero": true, "level": 5, "undead": true,
+			"description": "Ледяной колдун: замораживает, защищает союзников и обращает землю в прах.",
+			"cost": {"gold": 425, "wood": 110}, "supply": 5, "build_time": 55,
+			"hp": 720, "damage": 24, "attack_cooldown": 1.7, "range": 6.5, "damage_type": "magic",
+			"armor": 1, "armor_type": "hero", "speed": 3.0, "radius": 0.45, "mana": 360, "mana_regen": 1.3,
+			"hotkey": "E", "projectile": "magic",
+			"model": {"shape": "humanoid", "scale": 1.25, "bulk": 0.85, "skin": "#cfe0e8", "cloth": "#2a3a5a", "pants": "#1a2a4a", "weapon": "staff", "head": "crown", "robe": true, "cape": true, "hero": true, "orb": "#9fe8ff", "skull": true},
+			"abilities": [
+				{"key": "frost_nova", "name": "Кольцо льда", "type": "active", "hotkey": "Q", "icon": "snow", "color": "#9fe8ff", "target": "point", "mana": 90, "cooldown": 9, "range": 8.0,
+					"effect": {"kind": "area_damage", "center": "point", "amount": 130, "damage_type": "magic", "radius": 2.8, "slow": 0.5, "duration": 4}, "description": "{amount} урона в области и замедление на {slow%}% на {duration} с."},
+				{"key": "frost_armor", "name": "Ледяной доспех", "type": "active", "hotkey": "E", "icon": "shield", "color": "#bfe8ff", "target": "unit_ally", "mana": 50, "cooldown": 6, "range": 7.0,
+					"effect": {"kind": "buff", "who": "target", "duration": 30, "mods": {"armor_add": 6}}, "description": "Союзник на {duration} с получает +{armor_add} брони."},
+				{"key": "frost_chain", "name": "Ледяная цепь", "type": "active", "hotkey": "R", "icon": "bolt", "color": "#cfe8ff", "target": "unit_enemy", "mana": 90, "cooldown": 10, "range": 7.0,
+					"effect": {"kind": "chain", "amount": 130, "damage_type": "magic", "jumps": 3, "decay": 0.8, "radius": 5.0}, "description": "Лёд бьёт цель на {amount} урона и перескакивает ещё на {jumps} врагов."},
+				{"key": "cold_aura", "name": "Аура холода", "type": "passive", "icon": "mana", "color": "#9fe8ff", "description": "Союзники в радиусе 7 получают +{mana_regen} маны в секунду.", "aura": {"radius": 7.0, "mods": {"mana_regen": 0.8}}},
+				{"key": "death_decay", "name": "Смерть и тлен", "type": "active", "ultimate": true, "hotkey": "T", "icon": "skull", "color": "#5a6a3a", "target": "point", "mana": 180, "cooldown": 70, "range": 9.0,
+					"effect": {"kind": "area_damage", "center": "point", "amount": 360, "damage_type": "magic", "radius": 5.0}, "description": "Всё живое в большой области получает {amount} урона."}
+			],
+			"growth": {"hp": 75, "damage": 3, "armor": 0.3, "mana": 40, "mana_regen": 0.08}
+		},
+		"dreadlord": {
+			"name": "Повелитель ужаса", "role": "hero", "hero": true, "level": 5, "undead": true,
+			"description": "Демон-вампир: насылает стаи и сон, пьёт кровь и обрушивает инферно.",
+			"cost": {"gold": 440, "wood": 100}, "supply": 5, "build_time": 55,
+			"hp": 1000, "damage": 34, "attack_cooldown": 1.6, "range": 0.8, "damage_type": "normal",
+			"armor": 3, "armor_type": "hero", "speed": 3.3, "radius": 0.6, "mana": 280, "mana_regen": 1.0,
+			"hotkey": "R",
+			"model": {"shape": "humanoid", "scale": 1.35, "bulk": 1.15, "skin": "#6a5a7a", "cloth": "#3a1a2a", "pants": "#2a101a", "weapon": "sword", "head": "horned", "armored": true, "cape": true, "hero": true},
+			"abilities": [
+				{"key": "carrion_swarm", "name": "Стая падальщиков", "type": "active", "hotkey": "Q", "icon": "fang", "color": "#6a4a8a", "target": "point", "mana": 90, "cooldown": 10, "range": 8.0,
+					"effect": {"kind": "area_damage", "center": "point", "amount": 140, "damage_type": "magic", "radius": 3.0}, "description": "{amount} урона всем врагам в области."},
+				{"key": "sleep", "name": "Сон", "type": "active", "hotkey": "E", "icon": "hourglass", "color": "#8a6aff", "target": "unit_enemy", "mana": 60, "cooldown": 12, "range": 7.0,
+					"effect": {"kind": "smite", "amount": 30, "damage_type": "magic", "stun": 4.0}, "description": "Враг засыпает на {stun} с."},
+				{"key": "blood_thirst", "name": "Жажда крови", "type": "active", "hotkey": "R", "icon": "fang", "color": "#b0202d", "target": "none", "mana": 60, "cooldown": 20, "range": 0,
+					"effect": {"kind": "buff", "who": "self", "duration": 15, "mods": {"lifesteal": 0.4, "damage_mul": 1.15}}, "description": "{duration} с вампиризм {lifesteal%}% и урон +{damage_mul%}%."},
+				{"key": "vampiric_aura", "name": "Аура вампиризма", "type": "passive", "icon": "aura", "color": "#b0202d", "description": "Союзники в радиусе 7 лечатся на {lifesteal%}% нанесённого урона.", "aura": {"radius": 7.0, "mods": {"lifesteal": 0.12}}},
+				{"key": "inferno", "name": "Инферно", "type": "active", "ultimate": true, "hotkey": "T", "icon": "meteor", "color": "#ff5a1a", "target": "point", "mana": 170, "cooldown": 65, "range": 9.0,
+					"effect": {"kind": "leap", "amount": 260, "damage_type": "magic", "radius": 3.2, "stun": 2.0}, "description": "Обрушивается огненным ударом в точку: {amount} урона вокруг и оглушение на {stun} с."}
+			],
+			"growth": {"hp": 110, "damage": 5, "armor": 0.4, "mana": 30, "mana_regen": 0.06}
+		},
+		"crypt_lord": {
+			"name": "Повелитель склепов", "role": "hero", "hero": true, "level": 5, "undead": true,
+			"description": "Панцирный исполин: шипы из-под земли, жуки-трупоеды и рой саранчи.",
+			"cost": {"gold": 450, "wood": 90}, "supply": 5, "build_time": 55,
+			"hp": 1350, "damage": 36, "attack_cooldown": 1.9, "range": 0.9, "damage_type": "normal",
+			"armor": 5, "armor_type": "hero", "speed": 2.9, "radius": 0.8, "mana": 230, "mana_regen": 0.8,
+			"hotkey": "T",
+			"model": {"shape": "humanoid", "scale": 1.6, "bulk": 1.7, "skin": "#4a5a3a", "cloth": "#2a3a2a", "pants": "#1a2a1a", "weapon": "fists", "head": "horned", "rocky": true, "hero": true},
+			"abilities": [
+				{"key": "impale", "name": "Пронзание", "type": "active", "hotkey": "Q", "icon": "thorns", "color": "#8a7a5a", "target": "point", "mana": 90, "cooldown": 11, "range": 7.0,
+					"effect": {"kind": "area_damage", "center": "point", "amount": 120, "damage_type": "normal", "radius": 3.0, "stun": 1.5}, "description": "Шипы из-под земли: {amount} урона в области и оглушение на {stun} с."},
+				{"key": "carrion_beetles", "name": "Жуки-трупоеды", "type": "active", "hotkey": "E", "icon": "paw", "color": "#5a6a3a", "target": "none", "mana": 80, "cooldown": 30, "range": 0,
+					"effect": {"kind": "summon", "unit": "beetle", "count": 2, "duration": 60}, "description": "Призывает жуков ({count}) на {duration} с."},
+				{"key": "thorn_shell", "name": "Шипастый панцирь", "type": "active", "hotkey": "R", "icon": "thorns", "color": "#a07a4a", "target": "none", "mana": 60, "cooldown": 20, "range": 0,
+					"effect": {"kind": "buff", "who": "self", "duration": 15, "mods": {"thorns": 0.4, "armor_add": 3}}, "description": "{duration} с: шипы {thorns%}% и +{armor_add} брони."},
+				{"key": "carapace", "name": "Хитиновый панцирь", "type": "passive", "icon": "shield", "color": "#4a5a3a", "description": "+{armor_add} брони и шипы {thorns%}%.", "self_mods": {"armor_add": 3, "thorns": 0.15}},
+				{"key": "locust_swarm", "name": "Рой саранчи", "type": "active", "ultimate": true, "hotkey": "T", "icon": "stomp", "color": "#8a8a3a", "target": "none", "mana": 160, "cooldown": 65, "range": 0,
+					"effect": {"kind": "area_damage", "center": "self", "amount": 320, "damage_type": "magic", "radius": 6.0}, "description": "Рой выжирает всё вокруг: {amount} урона врагам в большом радиусе."}
+			],
+			"growth": {"hp": 150, "damage": 5, "armor": 0.6, "mana": 20, "mana_regen": 0.04}
+		}
+	},
+	"summons": {
+		"skeleton_warrior": {"name": "Скелет-воин", "role": "summon", "level": 1, "supply": 0, "undead": true, "hp": 300, "damage": 12, "attack_cooldown": 1.3, "range": 0.5, "damage_type": "normal", "armor": 1, "armor_type": "medium", "speed": 3.1, "radius": 0.4, "mana": 0, "mana_regen": 0,
+			"model": {"shape": "humanoid", "scale": 0.98, "bulk": 0.85, "skin": "#e8e2cf", "cloth": "#4a4540", "pants": "#d8d2bf", "weapon": "sword", "head": "none", "shield": true}},
+		"beetle": {"name": "Жук-трупоед", "role": "summon", "level": 2, "supply": 0, "undead": true, "hp": 420, "damage": 16, "attack_cooldown": 1.2, "range": 0.5, "damage_type": "normal", "armor": 3, "armor_type": "heavy", "speed": 3.3, "radius": 0.5, "mana": 0, "mana_regen": 0,
+			"model": {"shape": "slime", "scale": 0.8, "color": "#4a5a3a"}}
+	},
+	"buildings": {
+		"supply": {"name": "Склеп", "role": "supply", "hotkey": "Q", "undead": true, "cost": {"gold": 85, "wood": 25}, "build_time": 25, "hp": 650, "armor": 5, "armor_type": "fortified", "size": 2, "mana": 0, "mana_regen": 0, "model": {"shape": "undead_crypt"}, "supply_given": 8},
+		"barracks": {"name": "Костяная яма", "role": "barracks", "hotkey": "E", "undead": true, "cost": {"gold": 160, "wood": 60}, "build_time": 45, "hp": 1300, "armor": 5, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "undead_barracks"}, "trains": ["melee", "ranged", "heavy"]},
+		"tower": {"name": "Башня духов", "role": "tower", "hotkey": "R", "undead": true, "cost": {"gold": 110, "wood": 90}, "build_time": 40, "hp": 600, "armor": 5, "armor_type": "fortified", "size": 2, "mana": 0, "mana_regen": 0, "model": {"shape": "undead_tower"}, "damage": 18, "attack_cooldown": 1.0, "range": 8.0, "damage_type": "magic"},
+		"hall": {"name": "Некрополь", "role": "hall", "hotkey": "T", "undead": true, "cost": {"gold": 385, "wood": 205}, "build_time": 90, "hp": 1700, "armor": 5, "armor_type": "fortified", "size": 4, "mana": 0, "mana_regen": 0, "model": {"shape": "undead_hall"}, "supply_given": 15, "trains": ["worker"], "researches": ["tier"]},
+		"altar": {"name": "Алтарь тьмы", "role": "altar", "hotkey": "F", "undead": true, "cost": {"gold": 180, "wood": 50}, "build_time": 45, "hp": 950, "armor": 5, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "undead_altar"}, "trains": ["death_lord", "lich", "dreadlord", "crypt_lord"]},
+		"forge": {"name": "Кладбищенская кузня", "role": "forge", "hotkey": "G", "undead": true, "cost": {"gold": 140, "wood": 60}, "build_time": 40, "hp": 950, "armor": 5, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "undead_forge"}, "researches": ["weapons", "armor"]},
+		"temple": {"name": "Храм проклятых", "role": "temple", "hotkey": "V", "undead": true, "cost": {"gold": 175, "wood": 80}, "build_time": 45, "hp": 1050, "armor": 5, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "undead_temple"}, "trains": ["dark_priest", "banshee", "necromancer"]},
+		"workshop": {"name": "Бойня", "role": "workshop", "hotkey": "B", "undead": true, "cost": {"gold": 190, "wood": 140}, "build_time": 50, "hp": 1150, "armor": 5, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "undead_works"}, "trains": ["plague_cart"]}
+	},
+	"start": {
+		"hall": "hall",
+		"units": {
+			"worker": 8
+		}
+	},
+	"upgrades": {
+		"weapons": {"name": "Проклятое оружие", "hotkey": "Q", "icon": "blade", "color": "#8aff6a", "max": 3, "cost": {"gold": 150, "wood": 75}, "time": 40, "mods": {"damage_mul": 1.1}, "description": "Все ваши юниты наносят на 10% больше урона за каждый уровень."},
+		"armor": {"name": "Костяная броня", "hotkey": "E", "icon": "shield", "color": "#c9c0a8", "max": 3, "cost": {"gold": 150, "wood": 100}, "time": 40, "mods": {"armor_add": 1}, "description": "Все ваши юниты получают +1 брони за каждый уровень."},
+		"tier": {"name": "Чёрная цитадель", "hotkey": "E", "icon": "skull", "color": "#6aff8a", "max": 1, "cost": {"gold": 320, "wood": 210}, "time": 70, "mods": {}, "hall_hp": 500, "description": "Второй уровень главного здания. Открывает «Мясника», «Чумную телегу» и найм второго героя, главное здание получает +500 прочности."}
+	}
+}
