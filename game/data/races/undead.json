@@ -4,6 +4,38 @@
 	"description": "Чума: очень много здоровья, но мало урона; святой урон для них особенно опасен. Здания призываются и растут сами — рабочий сразу свободен. Павшие оставляют тела: гули ими кормятся, некроманты поднимают из них скелетов.",
 	"traits": {"summon_build": true},
 	"units": {
+		"crypt_spider": {
+			"name": "Склепный паук", "role": "ranged", "level": 3, "tier": 2, "undead": true,
+			"description": "Огромный паук из склепов. Плюётся паутиной: враг замедляется на 40% на 2,5 с.",
+			"cost": {"gold": 190, "wood": 40}, "supply": 3, "build_time": 24,
+			"hp": 580, "damage": 21, "attack_cooldown": 1.6, "range": 5.5, "damage_type": "pierce",
+			"armor": 1, "armor_type": "medium", "speed": 3.2, "radius": 0.62, "mana": 0, "mana_regen": 0,
+			"projectile": "magic",
+			"chill": {"speed_mul": 0.6, "cooldown_mul": 1.0, "duration": 2.5},
+			"model": {"shape": "spider", "scale": 1.35, "color": "#3a3a48"},
+			"hotkey": "T"
+		},
+		"abomination": {
+			"name": "Поганище", "role": "elite", "level": 5, "tier": 3, "undead": true,
+			"description": "Сшитое из трупов чудовище с тесаком. Удары отравляют (6 урона в секунду 4 с), а погибая, оно лопается чумным облаком: 150 урона врагам вокруг.",
+			"cost": {"gold": 290, "wood": 90}, "supply": 5, "build_time": 36,
+			"hp": 1550, "damage": 32, "attack_cooldown": 1.7, "range": 0.7, "damage_type": "normal",
+			"armor": 3, "armor_type": "heavy", "speed": 2.7, "radius": 0.72, "mana": 0, "mana_regen": 0,
+			"poison": {"dps": 6, "duration": 4},
+			"death_blast": {"radius": 3.0, "damage": 150, "type": "magic", "color": "#8aff5a"},
+			"model": {"shape": "humanoid", "scale": 1.4, "bulk": 1.75, "skin": "#9aaa8a", "cloth": "#5a4a4a", "pants": "#3a3030", "weapon": "axe", "head": "bald", "ogre": true},
+			"hotkey": "E"
+		},
+		"death_knight": {
+			"name": "Тёмный рыцарь", "role": "heavy", "level": 4, "tier": 2, "undead": true,
+			"description": "Павший рыцарь на костяном коне. Каждый удар возвращает ему пятую часть нанесённого урона.",
+			"cost": {"gold": 250, "wood": 70}, "supply": 4, "build_time": 30,
+			"hp": 900, "damage": 30, "attack_cooldown": 1.5, "range": 0.7, "damage_type": "normal",
+			"armor": 4, "armor_type": "heavy", "speed": 4.0, "radius": 0.7, "mana": 0, "mana_regen": 0,
+			"lifesteal": 0.2,
+			"model": {"shape": "mounted", "scale": 1.0, "bulk": 1.1, "skin": "#c9d0b8", "cloth": "#2a2a34", "pants": "#1a1a22", "weapon": "sword", "head": "knight", "armored": true, "cape": true, "skull": true},
+			"hotkey": "Q"
+		},
 		"worker": {
 			"name": "Упырь-работник", "role": "worker", "level": 1, "undead": true,
 			"cost": {"gold": 75, "wood": 0}, "supply": 1, "build_time": 12,
@@ -175,12 +207,15 @@
 	},
 	"buildings": {
 		"supply": {"name": "Склеп", "role": "supply", "hotkey": "Q", "undead": true, "cost": {"gold": 85, "wood": 25}, "build_time": 25, "hp": 650, "armor": 5, "armor_type": "fortified", "size": 2, "mana": 0, "mana_regen": 0, "model": {"shape": "undead_crypt"}, "supply_given": 8},
-		"barracks": {"name": "Костяная яма", "role": "barracks", "hotkey": "E", "undead": true, "cost": {"gold": 160, "wood": 60}, "build_time": 45, "hp": 1300, "armor": 5, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "undead_barracks"}, "trains": ["melee", "ranged", "heavy"]},
+		"barracks": {"name": "Костяная яма", "role": "barracks", "hotkey": "E", "undead": true, "cost": {"gold": 160, "wood": 60}, "build_time": 45, "hp": 1300, "armor": 5, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "undead_barracks"}, "trains": ["melee", "ranged", "heavy", "crypt_spider"]},
 		"tower": {"name": "Башня духов", "role": "tower", "hotkey": "R", "undead": true, "cost": {"gold": 110, "wood": 90}, "build_time": 40, "hp": 600, "armor": 5, "armor_type": "fortified", "size": 2, "mana": 0, "mana_regen": 0, "model": {"shape": "undead_tower"}, "damage": 18, "attack_cooldown": 1.0, "range": 8.0, "damage_type": "magic"},
 		"hall": {"name": "Некрополь", "role": "hall", "hotkey": "T", "undead": true, "cost": {"gold": 385, "wood": 205}, "build_time": 90, "hp": 1700, "armor": 5, "armor_type": "fortified", "size": 4, "mana": 0, "mana_regen": 0, "model": {"shape": "undead_hall"}, "supply_given": 15, "trains": ["worker"], "researches": ["tier"]},
 		"altar": {"name": "Алтарь тьмы", "role": "altar", "hotkey": "F", "undead": true, "cost": {"gold": 180, "wood": 50}, "build_time": 45, "hp": 950, "armor": 5, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "undead_altar"}, "trains": ["death_lord", "lich", "dreadlord", "crypt_lord"]},
-		"forge": {"name": "Кладбищенская кузня", "role": "forge", "hotkey": "G", "undead": true, "cost": {"gold": 140, "wood": 60}, "build_time": 40, "hp": 950, "armor": 5, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "undead_forge"}, "researches": ["weapons", "armor"]},
+		"forge": {"name": "Кладбищенская кузня", "role": "forge", "hotkey": "G", "undead": true, "cost": {"gold": 140, "wood": 60}, "build_time": 40, "hp": 950, "armor": 5, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "undead_forge"}, "researches": ["weapons", "armor", "hunger", "bone_arrows", "dark_haste"]},
 		"temple": {"name": "Храм проклятых", "role": "temple", "hotkey": "V", "undead": true, "cost": {"gold": 175, "wood": 80}, "build_time": 45, "hp": 1050, "armor": 5, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "undead_temple"}, "trains": ["dark_priest", "banshee", "necromancer"]},
+		"elite": {"name": "Чумной склеп", "role": "elite", "hotkey": "Y", "undead": true, "tier": 2, "cost": {"gold": 220, "wood": 120}, "build_time": 55, "hp": 1400, "armor": 5, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0,
+			"model": {"shape": "undead_barracks", "elite": true, "trim": "#8aff6a"}, "trains": ["death_knight", "abomination"],
+			"description": "Элитные казармы. Строятся после улучшения главного здания до 2 уровня; нужны для 3 уровня."},
 		"workshop": {"name": "Бойня", "role": "workshop", "hotkey": "B", "undead": true, "cost": {"gold": 190, "wood": 140}, "build_time": 50, "hp": 1150, "armor": 5, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "undead_works"}, "trains": ["plague_cart"]}
 	},
 	"start": {
@@ -192,6 +227,13 @@
 	"upgrades": {
 		"weapons": {"name": "Проклятое оружие", "hotkey": "Q", "icon": "blade", "color": "#8aff6a", "max": 3, "cost": {"gold": 150, "wood": 75}, "time": 40, "mods": {"damage_mul": 1.1}, "description": "Все ваши юниты наносят на 10% больше урона за каждый уровень."},
 		"armor": {"name": "Костяная броня", "hotkey": "E", "icon": "shield", "color": "#c9c0a8", "max": 3, "cost": {"gold": 150, "wood": 100}, "time": 40, "mods": {"armor_add": 1}, "description": "Все ваши юниты получают +1 брони за каждый уровень."},
-		"tier": {"name": "Чёрная цитадель", "hotkey": "E", "icon": "skull", "color": "#6aff8a", "max": 1, "cost": {"gold": 320, "wood": 210}, "time": 70, "mods": {}, "hall_hp": 500, "description": "Второй уровень главного здания. Открывает «Мясника», «Чумную телегу» и найм второго героя, главное здание получает +500 прочности."}
+		"tier": {"name": "Чёрная цитадель", "hotkey": "E", "icon": "skull", "color": "#6aff8a", "max": 2, "cost": {"gold": 320, "wood": 210}, "costs": [{"gold": 320, "wood": 210}, {"gold": 700, "wood": 480}], "times": [70, 100], "mods": {}, "hall_hp": 500,
+			"description": "Уровень 2 (Чёрная цитадель): открывает «Мясника», «Склепного паука», «Чумную телегу», Чумной склеп и второго героя.\nУровень 3 (Твердыня мёртвых): открывает «Поганище» и третьего героя. Нужны готовые алтарь тьмы, храм проклятых и чумной склеп.\nКаждый уровень: главное здание +500 прочности."},
+		"hunger": {"name": "Неутолимый голод", "hotkey": "R", "icon": "fang", "color": "#c83a3a", "max": 2, "cost": {"gold": 120, "wood": 80}, "time": 35,
+			"units": ["melee", "heavy", "abomination"], "mods": {"lifesteal": 0.05}, "description": "Гули, мясники и поганища: вампиризм +5% за уровень."},
+		"bone_arrows": {"name": "Костяные стрелы", "hotkey": "T", "icon": "arrows", "color": "#e8e2cf", "max": 2, "cost": {"gold": 110, "wood": 80}, "time": 35,
+			"units": ["ranged", "crypt_spider"], "mods": {"damage_mul": 1.1}, "description": "Костяные лучники и склепные пауки бьют на 10% сильнее за уровень."},
+		"dark_haste": {"name": "Нечестивая спешка", "hotkey": "F", "icon": "boot", "color": "#6aff8a", "max": 2, "cost": {"gold": 130, "wood": 100}, "time": 40, "tier": 2,
+			"army": true, "mods": {"speed_mul": 1.05}, "description": "Все бойцы бегают на 5% быстрее за уровень."}
 	}
 }

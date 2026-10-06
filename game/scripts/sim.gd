@@ -1,4 +1,4 @@
-extends RefCounted
+﻿extends RefCounted
 ## Симуляция игры: ТОЛЬКО правила, никакой графики.
 ## Работает фиксированными шагами (тиками). Изменить состояние игры можно
 ## единственным способом: отправить команду через push_command().
@@ -53,6 +53,9 @@ var _swim := AStarGrid2D.new()    # та же карта для пловцов (
 var _water: Dictionary = {}       # клетки с водой (непроходимы для всех, кроме пловцов)
 var _side := PackedInt32Array()   # сторона каждого игрока: у союзников одно и то же число
 var corpses: Dictionary = {}      # id -> {id, pos, expires}: тела павших (ими кормятся гули, их поднимают некроманты)
+var high_cells: Dictionary = {}   # клетки на вершинах возвышенностей (строятся из зерна карты, у всех одинаковые)
+const HIGH_RANGE := 1.0           # стрелки на возвышенности бьют дальше
+const HIGH_SIGHT := 2.5           # и видно с неё дальше (fog.gd)
 
 
 func _init() -> void:
@@ -98,6 +101,10 @@ func set_map_size(n: int) -> void:
 		g.cell_size = Vector2.ONE
 		g.offset = Vector2(0.5, 0.5)
 		g.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_ONLY_IF_NO_OBSTACLES
+		# восьминаправленная оценка точнее евклидовой для такой сетки: те же пути на ~15% быстрее
+		# (поиск «прыжками» пробовали — на наших картах он медленнее)
+		g.default_estimate_heuristic = AStarGrid2D.HEURISTIC_OCTILE
+		g.default_compute_heuristic = AStarGrid2D.HEURISTIC_OCTILE
 		g.update()
 
 
@@ -139,9 +146,15 @@ func in_water(p: Vector2) -> bool:
 func has_trait(u: Dictionary, key: String) -> bool:
 	if u["def"].has(key):
 		return true
-	if is_worker(u) or not players.has(u["player"]):
-		return false
-	return (players[u["player"]]["data"].get("unit_traits", {}) as Dictionary).has(key)
+	var tr = u.get("_tr")      # расовые свойства юнита считаются один раз и запоминаются в нём
+	if tr == null:
+		tr = {}
+		if not is_worker(u) and players.has(u["player"]):
+			for k in players[u["player"]]["data"].get("unit_traits", {}):
+				if not (u["def"].get("lacks", []) as Array).has(k):      # lacks: чего этот юнит расы не умеет
+					tr[k] = true
+		u["_tr"] = tr
+	return (tr as Dictionary).has(key)
 
 
 func race_trait(player: int, key: String) -> bool:
@@ -323,6 +336,187 @@ func _do_repair(u: Dictionary, o: Dictionary) -> void:
 		events.append({"type": "repair_spark", "id": b["id"], "pos": u["pos"]})
 
 
+# ---------- рабочие убегают от нападения ----------
+
+const FLEE_TICKS := 30            # сколько бежит рабочий, прежде чем вернуться к делу
+const FLEE_DIST := 7.0
+const LARGE_RADIUS := 0.62        # «крупные» цели (всадники, великаны, машины) — против них хороши копья
+
+
+## По рабочему ударили: он бросает дело и отбегает от обидчика (в сторону своей базы,
+## если это возможно). Прямой приказ игрока «иди туда» он не нарушает.
+func _flee(u: Dictionary, src: Dictionary) -> void:
+	var o: Dictionary = u["order"]
+	var kind := String(o.get("type", "idle"))
+	if kind == "attack" or (kind == "move" and o.get("manual", false)):
+		return      # игрок сам велел драться или бежать в определённое место
+	var resume: Dictionary = o.get("resume", {"type": "idle"}) if kind == "flee" else o
+	if kind == "flee" and tick < int(o.get("repath", 0)):
+		o["until"] = tick + FLEE_TICKS      # продолжают бить — бежит дальше
+		return
+	if kind in ["idle", "move", "home", "follow", "attack", "amove"]:
+		resume = {"type": "idle"}
+	var away: Vector2 = (u["pos"] as Vector2) - (src["pos"] as Vector2)
+	away = away.normalized() if away.length() > 0.05 else (u["facing"] as Vector2) * -1.0
+	var hall := nearest_hall(u)
+	var home_dir := away
+	if hall >= 0:
+		var hd: Vector2 = (buildings[hall]["pos"] as Vector2) - (u["pos"] as Vector2)
+		if hd.length() > 1.0 and hd.normalized().dot(away) > -0.2:
+			home_dir = hd.normalized()      # к своей базе, если она не за спиной врага
+	var best := Vector2(-1, -1)
+	var best_score := INF
+	for a in [0.0, 0.45, -0.45, 0.9, -0.9, 1.4, -1.4, 2.0, -2.0]:
+		var spot: Vector2 = (u["pos"] as Vector2) + away.rotated(a) * FLEE_DIST
+		var cell := to_cell(spot)
+		if not in_map(cell) or is_blocked(cell):
+			continue
+		var score: float = absf(a) - away.rotated(a).dot(home_dir) * 0.6
+		if score < best_score:
+			best_score = score
+			best = spot
+	if best.x < 0.0:
+		return
+	u["order"] = {"type": "flee", "until": tick + FLEE_TICKS, "repath": tick + 10, "resume": resume}
+	u["swing"] = -1.0
+	_path_to(u, best)
+	if kind != "flee":
+		events.append({"type": "flee", "id": u["id"], "player": u["player"], "pos": u["pos"]})
+
+
+## Рабочий отдышался: возвращается к тому, чем был занят.
+func _resume_work(u: Dictionary, o: Dictionary) -> void:
+	match String(o.get("type", "idle")):
+		"gather":
+			_start_gather(u, int(o["target"]), String(o["kind"]), o["pos"])
+		"return":
+			_start_return(u, int(o["target"]), String(o["kind"]), o["pos"])
+		"build":
+			if buildings.has(int(o["target"])) and not buildings[int(o["target"])]["done"]:
+				_start_build(u, int(o["target"]))
+			else:
+				_idle(u)
+		"repair":
+			if buildings.has(int(o["target"])):
+				u["order"] = {"type": "repair", "target": int(o["target"])}
+				u["wait"] = 0
+				_go_adjacent(u, _rect(buildings[int(o["target"])]))
+			else:
+				_idle(u)
+		_:
+			_idle(u)
+
+
+# ---------- нейтралы стерегут своё ----------
+
+const GUARD_BUILD_RADIUS := 7.5   # стройка ближе этого к лагерю будит его
+const GUARD_MINE_RADIUS := 8.0    # кто добывает золото из охраняемого рудника, на того нападают
+
+
+## Лагерь нейтралов, чей дом ближе radius к pos, нападает на target
+## (рабочего у рудника или на стройку).
+func _wake_guards(pos: Vector2, radius: float, target: int) -> bool:
+	var woke := false
+	for id in _units_near(pos, radius + LEASH * 0.5):
+		var n: Dictionary = units[id]
+		if int(n["player"]) != NEUTRAL or n.get("raider", false) or n.has("caravan") or int(n["camp"]) < 0 or int(n["camp"]) >= 300000:
+			continue
+		if float(n["damage"]) <= 0.0 or String(n["order"].get("type")) == "attack" or (n["home"] as Vector2).distance_to(pos) > radius:
+			continue
+		_order_attack(n, target, {})
+		woke = true
+	return woke
+
+
+## Есть ли рядом живой лагерь нейтралов, который проснётся от стройки.
+func guarded_spot(pos: Vector2, radius: float) -> bool:
+	for id in _units_near(pos, radius + LEASH * 0.5):
+		var n: Dictionary = units[id]
+		if int(n["player"]) == NEUTRAL and int(n["camp"]) >= 0 and int(n["camp"]) < 300000 and not n.get("raider", false) \
+				and float(n["damage"]) > 0.0 and (n["home"] as Vector2).distance_to(pos) <= radius:
+			return true
+	return false
+
+
+## Стройка у лагеря: нейтралы бросаются на строителя (или на само здание).
+func _guards_vs_site(b: Dictionary) -> void:
+	if (tick + int(b["id"])) % 5 != 0:
+		return
+	var target := int(b["id"])
+	var best := 4.5 + float(b["radius"])
+	for id in _units_near(b["pos"], best):
+		if int(units[id]["player"]) == int(b["player"]):
+			var d: float = (units[id]["pos"] as Vector2).distance_to(b["pos"])
+			if d < best:
+				best = d
+				target = int(id)
+	if _wake_guards(b["pos"], GUARD_BUILD_RADIUS + float(b["radius"]), target) and not b.get("warned", false):
+		b["warned"] = true
+		_msg(int(b["player"]), "Нейтралы заметили стройку рядом со своим лагерем и нападают!")
+
+
+# ---------- улучшения ----------
+
+## Действует ли улучшение на этого юнита: «units» — только перечисленные, «army» — все, кроме рабочих.
+func upgrade_applies(u: Dictionary, up: Dictionary) -> bool:
+	if up.has("units"):
+		return (up["units"] as Array).has(String(u["key"]))
+	if up.get("army", false):
+		return not is_worker(u)
+	return true
+
+
+## Прибавка к здоровью от изученных улучшений (новым юнитам — при появлении).
+func _upgrade_hp(u: Dictionary) -> void:
+	if not players.has(u["player"]) or int(u["player"]) == NEUTRAL:
+		return
+	var p: Dictionary = players[u["player"]]
+	for key in p.get("upgrades", {}):
+		var up: Dictionary = p["data"]["upgrades"][key]
+		var add := float(up.get("mods", {}).get("hp_add", 0)) * int(p["upgrades"][key])
+		if add > 0.0 and upgrade_applies(u, up):
+			u["max_hp"] = float(u["max_hp"]) + add
+			u["hp"] = float(u["hp"]) + add
+
+
+## Сколько добавляют к ноше рабочего улучшения «кирок».
+func carry_bonus(u: Dictionary) -> int:
+	var p: Dictionary = players[u["player"]]
+	var n := 0
+	for key in p.get("upgrades", {}):
+		var up: Dictionary = p["data"]["upgrades"][key]
+		if up.get("mods", {}).has("carry_add") and upgrade_applies(u, up):
+			n += int(up["mods"]["carry_add"]) * int(p["upgrades"][key])
+	return n
+
+
+# ---------- особые свойства бойцов ----------
+
+## Взрыв: урон врагам вокруг (подрывник, поганище при смерти).
+func _explode(u: Dictionary, spec: Dictionary, pos: Vector2) -> void:
+	var r := float(spec.get("radius", 2.0))
+	var player := int(u["player"])
+	events.append({"type": "blast", "pos": pos, "radius": r, "color": String(spec.get("color", "#ff9a3a"))})
+	events.append({"type": "explosion", "pos": pos, "color": String(spec.get("color", "#ff9a3a"))})
+	for id in _units_near(pos, r):
+		if units.has(id) and enemies(int(units[id]["player"]), player):
+			_damage(units[id], float(spec.get("damage", 100)), String(spec.get("type", "siege")), int(u["id"]), player)
+	var ids: Array = buildings.keys()
+	ids.sort()
+	for bid in ids:
+		if not buildings.has(bid):
+			continue
+		var b: Dictionary = buildings[bid]
+		if enemies(int(b["player"]), player) and int(b["player"]) != NEUTRAL and (b["pos"] as Vector2).distance_to(pos) <= r + float(b["radius"]):
+			_damage(b, float(spec.get("damage", 100)), String(spec.get("type", "siege")), int(u["id"]), player)
+
+
+## Яд: отравленный теряет здоровье каждую секунду (у отравителя — def.poison).
+func _poison(t: Dictionary, spec: Dictionary, player: int) -> void:
+	_add_buff(t, "poison", float(spec.get("duration", 4.0)), {"hp_regen": -float(spec.get("dps", 6.0))})
+	t["poison_by"] = player
+
+
 func _grid_for(swim: bool) -> AStarGrid2D:
 	return _swim if swim else _grid
 
@@ -343,6 +537,7 @@ func spawn_building(player: int, key: String, def: Dictionary, cell: Vector2i, d
 	var id := _new_id()
 	_set_solid(Rect2i(cell, Vector2i(size, size)), true)
 	var max_hp := float(def.get("hp", 100))
+	_bindex_dirty = true
 	buildings[id] = {
 		"id": id, "is_building": true, "player": player, "key": key, "def": def,
 		"cell": cell, "size": size, "max_hp": max_hp,
@@ -392,6 +587,7 @@ func spawn_unit(player: int, key: String, def: Dictionary, pos: Vector2, count_s
 		u["xp"] = 0
 		u["skills"] = {}   # ключ способности -> изученный ранг (1…MAX_RANK)
 	units[id] = u
+	_upgrade_hp(u)
 	if count_supply:
 		players[player]["supply_used"] += int(def.get("supply", 0))
 	events.append({"type": "unit_added", "id": id})
@@ -425,7 +621,7 @@ func _execute(cmd: Dictionary) -> void:
 			_cmd_move(cmd, "amove")
 		"attack":
 			var t = entity(int(cmd.get("target", -1)))
-			if t != null and enemies(int(t["player"]), int(cmd["player"])) and not t["def"].get("invulnerable", false):
+			if t != null and enemies(int(t["player"]), int(cmd["player"])) and not t["def"].get("invulnerable", false) and not t.has("merc_idle"):
 				for id in _owned(cmd):
 					if float(units[id]["damage"]) > 0.0:
 						_order_attack(units[id], int(t["id"]), {})
@@ -572,7 +768,7 @@ func _cmd_move(cmd: Dictionary, kind: String) -> void:
 			dest_cell = nearest_free_cell(dest_cell, taken, swims(u))
 			dest = cell_center(dest_cell)
 		taken[dest_cell] = true
-		u["order"] = {"type": kind, "dest": dest}
+		u["order"] = {"type": kind, "dest": dest, "manual": true}      # прямой приказ игрока: рабочий не убегает, а идёт куда сказано
 		u["swing"] = -1.0
 		_path_to(u, dest)
 
@@ -612,6 +808,9 @@ func _cmd_build(cmd: Dictionary) -> void:
 	if not can_place(size, cell):
 		_msg(player, "Здесь строить нельзя")
 		return
+	if int(def.get("tier", 1)) > tier(player):
+		_msg(player, "Сначала улучшите главное здание (%s) до %d уровня" % [String(defs["hall"]["name"]).to_lower(), int(def["tier"])])
+		return
 	if String(def.get("role", "")) == "hall" and not hall_spot_ok(cell, size):
 		_msg(player, "Главное здание нельзя ставить вплотную к руднику: нужен отступ %d клетки" % HALL_MINE_GAP)
 		return
@@ -650,7 +849,7 @@ func _cmd_train(cmd: Dictionary) -> void:
 	if def.get("hero", false):
 		var h = players[player]["heroes"].get(key)
 		if h == null and (players[player]["heroes"] as Dictionary).size() >= tier(player):
-			_msg(player, "Для второго героя улучшите главное здание (%s)" % hall_name)
+			_msg(player, "Для %s героя улучшите главное здание (%s)" % ["второго" if tier(player) == 1 else "третьего", hall_name])
 			return
 		if h != null:
 			match String(h["state"]):
@@ -849,25 +1048,35 @@ func _candidates(pos: Vector2, radius: float) -> Array:
 
 ## Юниты мягко расталкивают друг друга, чтобы не стоять один в другом.
 func _separate(ids: Array) -> void:
+	# Соседей берём прямо из клеток сетки (без промежуточных списков и сортировок):
+	# порядок обхода клеток и юнитов в них одинаков на всех компьютерах.
 	for ida in ids:
 		var ua: Dictionary = units[ida]
-		var near: Array = _candidates(ua["pos"], float(ua["radius"]) + MAX_RADIUS)
-		near.sort()
-		for idb in near:
-			if int(idb) <= int(ida) or not units.has(idb):
-				continue
-			var ub: Dictionary = units[idb]
-			var delta: Vector2 = ub["pos"] - ua["pos"]
-			var min_d: float = float(ua["radius"]) + float(ub["radius"])
-			if absf(delta.x) >= min_d or absf(delta.y) >= min_d:
-				continue
-			var d := delta.length()
-			if d >= min_d:
-				continue
-			var dir := Vector2(1, 0).rotated(float(int(ida) * 7 + int(idb) * 13)) if d < 0.001 else delta / d
-			var push := dir * (min_d - d) * 0.25
-			_try_shift(ua, -push)
-			_try_shift(ub, push)
+		var ra: float = float(ua["radius"])
+		var reach: float = ra + MAX_RADIUS
+		var pa: Vector2 = ua["pos"]
+		var lo := _bucket_of(pa - Vector2(reach, reach))
+		var hi := _bucket_of(pa + Vector2(reach, reach))
+		for cy in range(lo.y, hi.y + 1):
+			for cx in range(lo.x, hi.x + 1):
+				var list = _buckets.get(Vector2i(cx, cy))
+				if list == null:
+					continue
+				for idb in list:
+					if int(idb) <= int(ida):
+						continue
+					var ub: Dictionary = units[idb]
+					var delta: Vector2 = ub["pos"] - ua["pos"]
+					var min_d: float = ra + float(ub["radius"])
+					if absf(delta.x) >= min_d or absf(delta.y) >= min_d:
+						continue
+					var d := delta.length()
+					if d >= min_d:
+						continue
+					var dir := Vector2(1, 0).rotated(float(int(ida) * 7 + int(idb) * 13)) if d < 0.001 else delta / d
+					var push := dir * (min_d - d) * 0.25
+					_try_shift(ua, -push)
+					_try_shift(ub, push)
 
 
 func _try_shift(u: Dictionary, shift: Vector2) -> void:
@@ -926,10 +1135,19 @@ func _stop_path(u: Dictionary) -> void:
 
 
 func _think(u: Dictionary) -> void:
+	if u.has("merc_idle"):      # свободный наёмник сидит у костра своего лагеря
+		u["busy"] = true
+		return
 	u["busy"] = false
 	u["cd"] = maxf(0.0, float(u["cd"]) - TICK_DT)
 	if int(u["expires"]) >= 0 and tick >= int(u["expires"]):
 		_kill(u, NEUTRAL)       # время призванного существа вышло
+		return
+	# нейтралы, спокойно стоящие в лагере целыми и невредимыми, «дремлют»: думают раз в 4 тика
+	# (на большой карте их больше половины всех юнитов, а делать им нечего)
+	if int(u["player"]) == NEUTRAL and (tick + int(u["id"])) % 4 != 0 and String(u["order"].get("type", "idle")) == "idle" \
+			and float(u["swing"]) < 0.0 and float(u["hp"]) >= float(u["max_hp"]) and (u["buffs"] as Array).is_empty() \
+			and int(u["path_i"]) >= (u["path"] as PackedVector2Array).size() and tick >= int(u["stun"]):
 		return
 	# сколько тиков юнит стоит на месте (для «окопа» гномов и укрытия эльфов)
 	if (u["pos"] as Vector2).distance_squared_to(u["prev_pos"]) < 0.0004 and float(u["swing"]) < 0.0:
@@ -941,13 +1159,22 @@ func _think(u: Dictionary) -> void:
 		and tick - int(u.get("fought", -999)) > 30 and String(u["order"].get("type", "idle")) in ["idle", "move", "home"]
 	if u.has("pre_militia") and not _has_buff(u, "militia"):
 		_end_militia(u)
+	u["high"] = high_cells.has(Vector2i(floori((u["pos"] as Vector2).x), floori((u["pos"] as Vector2).y)))      # стоит на возвышенности
 	_refresh_stats(u)
 	if swims(u) and in_water(u["pos"]):      # наги в воде залечивают раны
 		u["hp"] = minf(float(u["max_hp"]), float(u["hp"]) + WATER_REGEN * TICK_DT)
 	if float(u["max_mana"]) > 0.0:
 		u["mana"] = minf(float(u["max_mana"]), float(u["mana"]) + float(u["mana_regen"]) * TICK_DT)
-	if float(u["hp_regen"]) > 0.0:
+	if float(u["hp_regen"]) != 0.0:      # отрицательное — яд
 		u["hp"] = minf(float(u["max_hp"]), float(u["hp"]) + float(u["hp_regen"]) * TICK_DT)
+		if float(u["hp"]) <= 0.0:
+			_kill(u, int(u.get("poison_by", NEUTRAL)))
+			return
+	# разбег для натиска: сколько тиков юнит бежит без удара
+	if is_moving(u) and float(u["swing"]) < 0.0:
+		u["run"] = int(u.get("run", 0)) + 1
+	elif not is_moving(u) and String(u["order"].get("type", "idle")) == "idle":
+		u["run"] = 0
 	if tick < int(u["stun"]):   # оглушён: ничего не делает
 		u["swing"] = -1.0
 		u["busy"] = true
@@ -993,6 +1220,9 @@ func _think(u: Dictionary) -> void:
 			_do_repair(u, o)
 		"eat":
 			_do_eat(u, o)
+		"flee":
+			if tick >= int(o["until"]) or (not is_moving(u) and tick >= int(o["repath"])):
+				_resume_work(u, o["resume"])
 		"follow":
 			var leader = units.get(o["target"])
 			if leader == null:
@@ -1015,6 +1245,9 @@ func _autocast(u: Dictionary) -> void:
 		return
 	if String(ac.get("kind", "heal")) == "summon":
 		_autocast_summon(u, ac)
+		return
+	if String(ac.get("kind", "heal")) == "buff":
+		_autocast_buff(u, ac)
 		return
 	var cost := float(ac.get("mana", 0))
 	if float(u["mana"]) < cost:
@@ -1039,6 +1272,30 @@ func _autocast(u: Dictionary) -> void:
 	events.append({"type": "cast", "id": u["id"], "key": "autocast"})
 	events.append({"type": "beam", "from": u["pos"], "to": t["pos"], "color": String(ac.get("color", "#9fffa0"))})
 	events.append({"type": "blast", "pos": t["pos"], "radius": 0.9, "color": String(ac.get("color", "#9fffa0"))})
+
+
+## Огр-маг в бою сам накладывает «Жажду крови» на дерущегося союзника рядом, у которого её ещё нет.
+func _autocast_buff(u: Dictionary, ac: Dictionary) -> void:
+	var key := String(ac.get("buff", "bloodlust"))
+	var best := -1
+	var best_d := float(ac.get("range", 7.0)) + 0.01
+	for id in _units_near(u["pos"], float(ac.get("range", 7.0))):
+		var a: Dictionary = units[id]
+		if int(a["player"]) != int(u["player"]) or is_worker(a) or float(a["damage"]) <= 0.0 or _has_buff(a, key):
+			continue
+		if tick - int(a.get("fought", -999)) > 30:
+			continue      # только тем, кто сейчас в бою
+		var d: float = (a["pos"] as Vector2).distance_to(u["pos"])
+		if d < best_d:
+			best_d = d
+			best = int(id)
+	if best < 0:
+		return
+	u["cds"]["auto"] = tick + int(float(ac.get("cooldown", 8.0)) * TICK_RATE)
+	_add_buff(units[best], key, float(ac.get("duration", 15.0)), ac.get("mods", {}))
+	events.append({"type": "cast", "id": u["id"], "key": "autocast"})
+	events.append({"type": "beam", "from": u["pos"], "to": units[best]["pos"], "color": String(ac.get("color", "#ff5a3a"))})
+	events.append({"type": "blast", "pos": units[best]["pos"], "radius": 0.9, "color": String(ac.get("color", "#ff5a3a"))})
 
 
 ## Некромант в бою поднимает скелетов (не больше ac.max одновременно; живут ac.duration секунд).
@@ -1136,7 +1393,7 @@ func _nearest_enemy(pos: Vector2, player: int, max_dist: float, with_buildings: 
 			best_d = d
 			best = int(id)
 	if best < 0 and with_buildings:
-		for id in buildings:
+		for id in _buildings_near(pos, max_dist + MAX_BUILDING_RADIUS):      # только здания из ближних клеток сетки
 			var b: Dictionary = buildings[id]
 			if not enemies(int(b["player"]), player) or int(b["player"]) == NEUTRAL:
 				continue
@@ -1145,6 +1402,46 @@ func _nearest_enemy(pos: Vector2, player: int, max_dist: float, with_buildings: 
 				best_d = d
 				best = int(id)
 	return best
+
+
+# ---------- указатели на здания (чтобы не перебирать все здания карты) ----------
+## Здания разложены по клеткам сетки, а ратуши — по игрокам. Пересобираются, только когда
+## здания появляются, исчезают или достраиваются (_bindex_dirty).
+
+const MAX_BUILDING_RADIUS := 2.5
+var _bindex_dirty := true
+var _bbuckets: Dictionary = {}       # клетка сетки -> [id зданий]
+var _halls_of: Dictionary = {}       # игрок -> [id готовых главных зданий] в порядке словаря buildings
+
+
+func _rebuild_bindex() -> void:
+	_bindex_dirty = false
+	_bbuckets.clear()
+	_halls_of.clear()
+	for id in buildings:
+		var b: Dictionary = buildings[id]
+		var c := _bucket_of(b["pos"])
+		if not _bbuckets.has(c):
+			_bbuckets[c] = []
+		(_bbuckets[c] as Array).append(id)
+		if b["done"] and String(b["def"].get("role", "")) == "hall":
+			if not _halls_of.has(int(b["player"])):
+				_halls_of[int(b["player"])] = []
+			(_halls_of[int(b["player"])] as Array).append(id)
+
+
+func _buildings_near(pos: Vector2, radius: float) -> Array:
+	if _bindex_dirty:
+		_rebuild_bindex()
+	var out: Array = []
+	var lo := _bucket_of(pos - Vector2.ONE * radius)
+	var hi := _bucket_of(pos + Vector2.ONE * radius)
+	for cy in range(lo.y, hi.y + 1):
+		for cx in range(lo.x, hi.x + 1):
+			var list = _bbuckets.get(Vector2i(cx, cy))
+			if list != null:
+				out.append_array(list)
+	return out
 
 
 func _order_attack(u: Dictionary, target: int, resume: Dictionary) -> void:
@@ -1186,10 +1483,21 @@ func _do_attack(u: Dictionary, o: Dictionary) -> void:
 		u["wait"] = int(u["wait"]) - 1
 		return
 	u["wait"] = 4
+	# путь прокладываем заново, только если цель сменилась или заметно ушла от точки, куда мы бежим
+	# (поиск пути — самое дорогое в игре, а бегущему за медленной целью он не нужен каждые 0,4 с)
+	var same: bool = is_moving(u) and int(u.get("chase", -1)) == int(t["id"])
 	if t["is_building"]:
+		if same:
+			return
 		_go_adjacent(u, _rect(t))
+		u["chase"] = int(t["id"])      # ставится после прокладки пути: любой другой путь (_path_to) его стирает
 	else:
-		_path_to(u, _attack_spot(u, t))
+		var spot := _attack_spot(u, t)
+		if same and spot.distance_to(u.get("chase_at", Vector2(-99, -99))) < maxf(0.8, (u["pos"] as Vector2).distance_to(spot) * 0.15):
+			return
+		_path_to(u, spot)
+		u["chase"] = int(t["id"])
+		u["chase_at"] = spot
 
 
 ## Куда бежать, чтобы ударить юнита. Бойцы ближнего боя не лезут все в его центр,
@@ -1204,13 +1512,15 @@ func _attack_spot(u: Dictionary, t: Dictionary) -> Vector2:
 	var ring := float(t["radius"]) + float(u["radius"]) + 0.1
 	var best := tp
 	var best_score := INF
+	var rr := float(u["radius"]) + 0.15
+	var near := _candidates(tp, ring + rr)      # один общий список соседей на все девять мест вокруг цели
 	for a in [0.0, 0.55, -0.55, 1.1, -1.1, 1.65, -1.65, 2.3, -2.3]:
 		var spot: Vector2 = tp + dir.rotated(a) * ring
 		if is_blocked(to_cell(spot)):
 			continue
 		var crowd := 0
-		for oid in _units_near(spot, float(u["radius"]) + 0.15):
-			if oid != int(u["id"]) and oid != int(t["id"]):
+		for oid in near:
+			if oid != int(u["id"]) and oid != int(t["id"]) and units.has(oid) and (units[oid]["pos"] as Vector2).distance_to(spot) <= rr + float(units[oid]["radius"]):
 				crowd += 1
 		var score := absf(a) + crowd * 2.5
 		if score < best_score:
@@ -1224,10 +1534,23 @@ func _strike(u: Dictionary) -> void:
 	var t = entity(int(u["swing_target"]))
 	if t == null:
 		return
+	if u["def"].has("kamikaze"):      # подрывник: удар — это взрыв, а сам он гибнет
+		_explode(u, u["def"]["kamikaze"], u["pos"])
+		if units.has(u["id"]):
+			_kill(u, int(u["player"]))
+		return
 	var dmg := float(u["damage"])
 	if float(u.get("crit", 0.0)) > 0.0 and _roll(int(u["id"]), int(t["id"]) + 7) < float(u["crit"]):
 		dmg *= CRIT_MUL       # критический удар
 		events.append({"type": "float", "player": u["player"], "pos": t["pos"], "text": "%d!" % roundi(dmg), "color": "#ff5a4a"})
+	if u["def"].has("charge") and int(u.get("run", 0)) >= int(float(u["def"]["charge"].get("after", 1.5)) * TICK_RATE):
+		var ch: Dictionary = u["def"]["charge"]      # натиск: первый удар с разбега сильнее и оглушает
+		dmg *= float(ch.get("mul", 1.8))
+		if not t["is_building"]:
+			t["stun"] = maxi(int(t["stun"]), tick + int(float(ch.get("stun", 0.5)) * TICK_RATE))
+		events.append({"type": "float", "player": u["player"], "pos": t["pos"], "text": "Натиск! %d" % roundi(dmg), "color": "#ffb03a"})
+		events.append({"type": "charge", "id": u["id"], "pos": t["pos"]})
+	u["run"] = 0
 	var splash_r := float(u["def"].get("splash_radius", 0.0))
 	if float(u["range"]) > 2.0:
 		var pid := _shoot(u["pos"], t, dmg, String(u["damage_type"]), int(u["id"]), int(u["player"]),
@@ -1285,7 +1608,7 @@ func _fly(p: Dictionary) -> void:
 
 
 func _damage(t: Dictionary, amount: float, dtype: String, attacker: int, attacker_player: int, attack := false) -> void:
-	if t["def"].get("invulnerable", false):
+	if t["def"].get("invulnerable", false) or t.has("merc_idle"):
 		return
 	var src = entity(attacker)
 	if attack and float(t.get("evasion", 0.0)) > 0.0 and _roll(attacker, int(t["id"])) < float(t["evasion"]):
@@ -1294,6 +1617,8 @@ func _damage(t: Dictionary, amount: float, dtype: String, attacker: int, attacke
 	var mult: float = float(combat.get("multipliers", {}).get(dtype, {}).get(String(t["armor_type"]), 1.0))
 	if dtype == "holy" and t["def"].get("undead", false):
 		mult *= HOLY_VS_UNDEAD      # святой урон особенно опасен для нежити
+	if attack and src != null and not src["is_building"] and src["def"].has("vs_large") and not t["is_building"] and float(t["radius"]) >= LARGE_RADIUS:
+		mult *= float(src["def"]["vs_large"])      # алебарды и копья против крупных: всадников, великанов, машин
 	var armor: float = maxf(0.0, float(t["armor"])) * float(combat.get("armor_k", 0.06))
 	var dealt: float = amount * mult * (1.0 - armor / (1.0 + armor)) * float(t.get("dmg_taken", 1.0))
 	var hp_before := float(t["hp"])
@@ -1311,6 +1636,11 @@ func _damage(t: Dictionary, amount: float, dtype: String, attacker: int, attacke
 		if src["def"].has("chill") and not t["is_building"]:      # холод глубин (наги): цель замедляется
 			var ch: Dictionary = src["def"]["chill"]
 			_add_buff(t, "chill", float(ch.get("duration", 2.0)), {"speed_mul": float(ch.get("speed_mul", 0.7)), "cooldown_mul": float(ch.get("cooldown_mul", 1.15))})
+		if src["def"].has("poison") and not t["is_building"]:      # ядовитые когти и плевки
+			_poison(t, src["def"]["poison"], attacker_player)
+		if src["def"].has("bash") and not t["is_building"] and _roll(attacker, int(t["id"]) + 13) < float(src["def"]["bash"].get("chance", 0.2)):
+			t["stun"] = maxi(int(t["stun"]), tick + int(float(src["def"]["bash"].get("stun", 1.0)) * TICK_RATE))      # оглушающий удар
+			events.append({"type": "float", "player": attacker_player, "pos": t["pos"], "text": "оглушён", "color": "#ffd24a"})
 		if float(src.get("lifesteal", 0.0)) > 0.0:      # вампиризм лечит атакующего
 			src["hp"] = minf(float(src["max_hp"]), float(src["hp"]) + dealt * float(src["lifesteal"]))
 		if float(t.get("thorns", 0.0)) > 0.0 and float(src["range"]) <= 2.0 and src != t:
@@ -1330,6 +1660,8 @@ func _damage(t: Dictionary, amount: float, dtype: String, attacker: int, attacke
 		var kind := String(t["order"].get("type"))
 		if kind == "idle" or kind == "amove":
 			_order_attack(t, attacker, t["order"] if kind == "amove" else {})
+	elif is_worker(t) and not _has_buff(t, "militia"):
+		_flee(t, entity(attacker))      # рабочий не дерётся, а убегает
 
 
 func _kill(t: Dictionary, killer_player: int) -> void:
@@ -1349,6 +1681,7 @@ func _kill(t: Dictionary, killer_player: int) -> void:
 				else:
 					players[owner]["heroes"].erase(q["key"])
 		buildings.erase(t["id"])
+		_bindex_dirty = true
 		events.append({"type": "building_removed", "id": t["id"]})
 		if players.has(killer_player) and killer_player != owner:
 			players[killer_player]["stats"]["razed"] += 1
@@ -1378,10 +1711,16 @@ func _kill(t: Dictionary, killer_player: int) -> void:
 		events.append({"type": "float", "player": killer["player"], "pos": killer["pos"], "text": "+%d" % int(gain), "color": "#ff7a5a"})
 		events.append({"type": "feast", "id": killer["id"]})
 	_award_xp(t, killer_player)
-	if t["def"].has("split"):      # слизень делится на маленьких
+	if t["def"].has("death_blast"):      # поганище лопается, задевая врагов вокруг
+		_explode(t, t["def"]["death_blast"], t["pos"])
+	if t["def"].has("split"):      # слизень делится на маленьких, гидра — на детёнышей
 		var sp: Dictionary = t["def"]["split"]
+		var own_kids: Dictionary = players[owner]["data"].get("summons", {}) if owner != NEUTRAL else {}
 		for i in int(sp.get("count", 2)):
-			var kid := spawn_unit(owner, String(sp["unit"]), _scaled_def(String(sp["unit"]), float(t.get("power", 1.0))), (t["pos"] as Vector2) + Vector2(0.6, 0).rotated(float(i) * PI + float(t["id"])), false)
+			var kdef: Dictionary = own_kids[String(sp["unit"])] if own_kids.has(String(sp["unit"])) else _scaled_def(String(sp["unit"]), float(t.get("power", 1.0)))
+			var kid := spawn_unit(owner, String(sp["unit"]), kdef, (t["pos"] as Vector2) + Vector2(0.6, 0).rotated(float(i) * PI + float(t["id"])), false)
+			if float(sp.get("lifetime", 0)) > 0.0:
+				units[kid]["expires"] = tick + int(float(sp["lifetime"]) * TICK_RATE)
 			units[kid]["camp"] = t["camp"]
 			units[kid]["power"] = t.get("power", 1.0)
 			if t.has("camp_level"):
@@ -1456,7 +1795,7 @@ func _respawn_camps() -> void:
 		return
 	var count := 0
 	for id in units:
-		if int(units[id]["player"]) == NEUTRAL and int(units[id]["expires"]) < 0:
+		if int(units[id]["player"]) == NEUTRAL and int(units[id]["expires"]) < 0 and not units[id].has("merc_idle"):
 			count += 1
 	if count >= neutral_cap:
 		return
@@ -1725,6 +2064,7 @@ func _update_world_events() -> void:
 		if mb != null:
 			_set_solid(_rect(mb), false)
 			buildings.erase(mb["id"])
+			_bindex_dirty = true
 			events.append({"type": "building_removed", "id": mb["id"]})
 		world["merchant"] = -1
 	if tick < int(world["storm"]) and tick % 35 == 0:      # гроза: молнии бьют в случайные места
@@ -1883,12 +2223,16 @@ func _update_building(b: Dictionary) -> void:
 	if not b["done"]:
 		if b.get("auto", false):      # нежить: призванное здание растёт само
 			_advance_build(b)
+		if int(b["player"]) != NEUTRAL:
+			_guards_vs_site(b)      # стройка под носом у лагеря будит нейтралов
 		return
 	if b["def"].has("well"):
 		_update_well(b)
 	match String(b["def"].get("role", "")):
 		"capture":
 			_update_capture(b)
+		"mercenary":
+			_update_merc(b)
 		"fountain":
 			if (tick + int(b["id"])) % TICK_RATE == 0:      # раз в секунду лечит всех рядом
 				for id in _units_near(b["pos"], float(b["def"].get("radius_heal", 5.0)) + float(b["radius"])):
@@ -1970,43 +2314,147 @@ func _update_capture(b: Dictionary) -> void:
 		b["cap"] = maxf(0.0, float(b.get("cap", 0.0)) - 0.5)
 
 
-## {"type": "hire", "player": 0, "building": id лагеря наёмников, "unit": "troll"}
+# ---------- лагеря наёмников ----------
+## У каждого лагеря свой вид (притон разбойников, логово троллей, стоянка огров, гоблинская
+## мастерская, пристань мурлоков) и свой набор бойцов. У каждого бойца — запас на складе,
+## который понемногу пополняется. Свободные наёмники сидят у костра (их видно), а нанятый
+## сам идёт к тому, кто его нанял. С середины партии в одном лагере ждёт легендарный капитан.
+
+const CAPTAIN_AT := 5400          # 9 минут: появляется легендарный наёмник
+
+
+func merc_theme(b: Dictionary) -> Dictionary:
+	return players[NEUTRAL]["data"].get("merc_camps", {}).get(String(b.get("merc", "")), {})
+
+
+## Предложения лагеря: {ключ: {gold, wood, stock, restock}} (с капитаном, если он здесь).
+func merc_offers(b: Dictionary) -> Dictionary:
+	var offers: Dictionary = (merc_theme(b).get("offers", {}) as Dictionary).duplicate()
+	if b.get("captain", false):
+		offers["merc_captain"] = {"gold": 650, "stock": 1, "restock": 0}
+	return offers
+
+
+func merc_def(key: String) -> Dictionary:
+	return players[NEUTRAL]["data"].get("mercs", {}).get(key, {})
+
+
+func _merc_init(b: Dictionary) -> void:
+	var themes: Array = (players[NEUTRAL]["data"].get("merc_camps", {}) as Dictionary).keys()
+	if themes.is_empty():
+		return
+	themes.sort()
+	b["merc"] = String(themes[absi(hash(seed_value * 31 + int(b["id"]) * 17)) % themes.size()])      # у всех игроков одинаково
+	b["stock"] = {}
+	b["restock_at"] = {}
+	b["idle"] = {}      # ключ бойца -> id наёмника, сидящего у костра
+	for key in merc_offers(b):
+		b["stock"][key] = int(merc_offers(b)[key].get("stock", 1))
+
+
+func _update_merc(b: Dictionary) -> void:
+	if not b.has("merc"):
+		_merc_init(b)
+	if (tick + int(b["id"])) % 10 != 0:
+		return
+	if tick >= CAPTAIN_AT and not b.get("captain", false) and not world.get("captain_placed", false):
+		var camps: Array = []
+		for id in buildings:
+			if String(buildings[id]["def"].get("role", "")) == "mercenary":
+				camps.append(int(id))
+		camps.sort()
+		if not camps.is_empty() and camps[absi(hash(seed_value + 77)) % camps.size()] == int(b["id"]):
+			world["captain_placed"] = true
+			b["captain"] = true
+			b["stock"]["merc_captain"] = 1
+			events.append({"type": "world_event", "kind": "captain", "pos": b["pos"], "player": -1})
+	var offers := merc_offers(b)
+	for key in offers:      # пополнение склада: по одному бойцу раз в restock секунд
+		var o: Dictionary = offers[key]
+		var have := int(b["stock"].get(key, 0))
+		if have < int(o.get("stock", 1)) and float(o.get("restock", 0)) > 0.0:
+			if not b["restock_at"].has(key):
+				b["restock_at"][key] = tick + int(float(o["restock"]) * TICK_RATE)
+			elif tick >= int(b["restock_at"][key]):
+				b["stock"][key] = have + 1
+				b["restock_at"].erase(key)
+		_merc_idle(b, key, int(b["stock"].get(key, 0)) > 0)
+
+
+## Свободный наёмник у костра: стоит, пока есть кому стоять; его нельзя ни ударить, ни выбрать целью.
+func _merc_idle(b: Dictionary, key: String, want: bool) -> void:
+	var id := int(b["idle"].get(key, -1))
+	var has := units.has(id)
+	if want and not has:
+		var keys: Array = merc_offers(b).keys()
+		keys.sort()
+		var a: float = TAU * float(keys.find(key)) / maxf(1.0, float(keys.size())) + float(b["id"])
+		var spot: Vector2 = (b["pos"] as Vector2) + Vector2(float(b["radius"]) + 1.6, 0).rotated(a)
+		var nid := spawn_unit(NEUTRAL, key, merc_def(key), spot, false)
+		units[nid]["merc_idle"] = int(b["id"])
+		units[nid]["facing"] = ((b["pos"] as Vector2) - (units[nid]["pos"] as Vector2)).normalized()
+		b["idle"][key] = nid
+	elif not want and has:
+		units.erase(id)
+		events.append({"type": "unit_removed", "id": id})
+		b["idle"].erase(key)
+
+
+## {"type": "hire", "player": 0, "building": id лагеря наёмников, "unit": "troll_berserk"}
 func _cmd_hire(cmd: Dictionary) -> void:
 	var player: int = int(cmd["player"])
 	var b = buildings.get(cmd.get("building"))
 	var key := String(cmd.get("unit", ""))
-	if b == null or String(b["def"].get("role", "")) != "mercenary" or not b["def"].get("hires", {}).has(key):
+	if b == null or String(b["def"].get("role", "")) != "mercenary":
 		return
-	var offer: Dictionary = b["def"]["hires"][key]
-	var near := false
+	if not b.has("merc"):
+		_merc_init(b)
+	var offers := merc_offers(b)
+	if not offers.has(key) or merc_def(key).is_empty():
+		return
+	var offer: Dictionary = offers[key]
+	var def: Dictionary = merc_def(key).duplicate()
+	var buyer := -1      # кто нанимает: ближайший к лагерю свой юнит (герой — в первую очередь)
+	var best := SHOP_RANGE + float(b["radius"]) + 0.01
 	for id in units:
-		if int(units[id]["player"]) == player and (units[id]["pos"] as Vector2).distance_to(b["pos"]) <= SHOP_RANGE:
-			near = true
-			break
-	if not near:
+		var u: Dictionary = units[id]
+		if int(u["player"]) != player:
+			continue
+		var d: float = (u["pos"] as Vector2).distance_to(b["pos"]) - (2.0 if u["hero"] else 0.0)
+		if d < best or (d == best and int(id) < buyer):
+			best = d
+			buyer = int(id)
+	if buyer < 0:
 		_msg(player, "Подведите к лагерю наёмников любого своего юнита")
-	elif tick < int(b.get("hire_cd", 0)):
-		_msg(player, "Наёмники ещё не готовы: %d с" % ceili((int(b["hire_cd"]) - tick) * TICK_DT))
-	elif int(players[player]["supply_used"]) + int(offer.get("supply", 2)) > int(players[player]["supply_cap"]):
+	elif int(b["stock"].get(key, 0)) <= 0:
+		_msg(player, "%s закончились — ждите пополнения" % String(def["name"]))
+	elif int(players[player]["supply_used"]) + int(def.get("supply", 2)) > int(players[player]["supply_cap"]):
 		_msg(player, "Не хватает лимита")
 	elif not can_afford(player, offer):
 		_msg(player, "Не хватает золота")
 	else:
 		_pay(player, offer)
-		var def: Dictionary = players[NEUTRAL]["data"]["units"][key].duplicate()
-		def["supply"] = int(offer.get("supply", 2))
+		b["stock"][key] = int(b["stock"][key]) - 1
 		def["bounty"] = 0
-		def["role"] = "merc"
-		var ring := _ring(_rect(b))
-		var spot: Vector2 = cell_center(ring[(int(b["id"]) + tick) % ring.size()]) if not ring.is_empty() else b["pos"]
-		spawn_unit(player, key, def, spot)
-		b["hire_cd"] = tick + int(float(b["def"].get("hire_cooldown", 20)) * TICK_RATE)
-		events.append({"type": "bought", "player": player, "id": -1, "item": "", "hired": def["name"]})
+		var spot: Vector2 = b["pos"]
+		var idle_id := int(b["idle"].get(key, -1))
+		if units.has(idle_id):      # нанятый — тот самый, что сидел у костра
+			spot = units[idle_id]["pos"]
+		if int(b["stock"][key]) <= 0:
+			_merc_idle(b, key, false)
+		var nid := spawn_unit(player, key, def, spot)
+		units[nid]["order"] = {"type": "follow", "target": buyer}      # сам идёт к нанявшему
+		if key == "merc_captain":
+			b["captain"] = false
+			b["stock"].erase(key)
+		events.append({"type": "bought", "player": player, "id": nid, "item": "", "hired": def["name"]})
+		events.append({"type": "blast", "pos": spot, "radius": 1.0, "color": "#ffd24a"})
 
 
 # ---------- способности героев, усиления, ауры ----------
 
 var _auras: Array = []
+var _up_ver: Dictionary = {}      # игрок -> сколько раз менялись его улучшения (для быстрого пути _refresh_stats)
 
 
 func ability(u: Dictionary, key: String) -> Variant:
@@ -2030,7 +2478,7 @@ func _collect_auras(ids: Array) -> void:
 	_auras.clear()
 	for id in ids:
 		var u: Dictionary = units[id]
-		if u["def"].has("aura"):      # аура обычного юнита (знаменосец)
+		if u["def"].has("aura") and not u.has("merc_idle"):      # аура обычного юнита (знаменосец)
 			_auras.append({"player": u["player"], "pos": u["pos"], "radius": float(u["def"]["aura"]["radius"]), "mods": u["def"]["aura"]["mods"], "only": -1})
 		if not u["hero"]:
 			continue
@@ -2049,6 +2497,29 @@ func _collect_auras(ids: Array) -> void:
 ## crit_chance, evasion, lifesteal, thorns, damage_taken_mul (hp_add и mana_add — при получении предмета).
 func _refresh_stats(u: Dictionary) -> void:
 	var d: Dictionary = u["def"]      # врождённые свойства (у сильных нейтралов)
+	# Быстрый путь: без усилений, предметов и аур характеристики зависят только от немногих
+	# условий (ночь, кровавая луна, окоп, уровень, изученные улучшения). Если ни одно не
+	# изменилось с прошлого раза — пересчитывать нечего. Так большинство юнитов в тик почти ничего не стоят.
+	var dyn: bool = not (u["buffs"] as Array).is_empty() or not (u["items"] as Array).is_empty()
+	if not dyn:
+		for a in _auras:
+			if int(a["only"]) >= 0:
+				if int(a["only"]) == int(u["id"]):
+					dyn = true
+					break
+			elif (a["pos"] as Vector2).distance_to(u["pos"]) <= float(a["radius"]) and not enemies(int(a["player"]), int(u["player"])):
+				dyn = true
+				break
+	var dug: bool = int(u.get("still", 0)) >= ENTRENCH_TICKS and has_trait(u, "entrench") and float(u["base"]["speed"]) > 0.0
+	if dyn:
+		u["_sk"] = -1
+	else:
+		var sig: int = (1 if dug else 0) | (2 if d.get("undead", false) and is_night() else 0) \
+			| (4 if int(u["player"]) == NEUTRAL and blood_moon() else 0) | (8 if u["hero"] and players[u["player"]].get("dragon_buff", false) else 0) \
+			| (16 if u.get("high", false) else 0) | (int(_up_ver.get(int(u["player"]), 0)) << 5) | (int(u["level"]) << 21)
+		if int(u.get("_sk", -1)) == sig:
+			return
+		u["_sk"] = sig
 	var m := {"armor_add": 0.0, "damage_mul": 1.0, "damage_add": 0.0, "cooldown_mul": 1.0, "speed_mul": 1.0, "hp_regen": float(d.get("hp_regen", 0)), "mana_regen": 0.0, "hp_add": 0.0,
 		"crit_chance": float(d.get("crit_chance", 0)), "evasion": float(d.get("evasion", 0)), "lifesteal": float(d.get("lifesteal", 0)), "thorns": float(d.get("thorns", 0)), "damage_taken_mul": 1.0}
 	for ik in u["items"]:      # предметы героя
@@ -2057,7 +2528,7 @@ func _refresh_stats(u: Dictionary) -> void:
 		m["hp_regen"] = float(m["hp_regen"]) + NIGHT_UNDEAD_REGEN      # нежить крепнет ночью
 	if int(u["player"]) == NEUTRAL and blood_moon():
 		_mix(m, {"damage_mul": 1.3, "speed_mul": 1.1})      # кровавая луна: нейтралы злее
-	u["entrenched"] = has_trait(u, "entrench") and int(u.get("still", 0)) >= ENTRENCH_TICKS and float(u["base"]["speed"]) > 0.0
+	u["entrenched"] = dug
 	if u["entrenched"]:
 		_mix(m, ENTRENCH_MODS)      # гномы: постоял — окопался
 	if u["hero"] and players[u["player"]].get("dragon_buff", false):
@@ -2079,15 +2550,21 @@ func _refresh_stats(u: Dictionary) -> void:
 		elif (a["pos"] as Vector2).distance_to(u["pos"]) <= float(a["radius"]):
 			_mix(m, a["mods"])
 	var ups: Dictionary = players[u["player"]].get("upgrades", {})
-	for key in ups:     # изученные улучшения действуют на всех юнитов игрока
-		var umods: Dictionary = players[u["player"]]["data"]["upgrades"][key]["mods"]
+	for key in ups:     # изученные улучшения: на всех юнитов игрока или только на некоторых
+		var up: Dictionary = players[u["player"]]["data"]["upgrades"][key]
+		if not upgrade_applies(u, up):
+			continue
+		var umods: Dictionary = up["mods"]
 		var lvl: float = float(ups[key])
 		for mk in umods:
+			if mk in ["hp_add", "carry_add"]:
+				continue      # здоровье прибавляется один раз, ноша — при добыче
 			if String(mk).ends_with("_mul"):
-				m[mk] = float(m[mk]) * pow(float(umods[mk]), lvl)
+				m[mk] = float(m.get(mk, 1.0)) * pow(float(umods[mk]), lvl)
 			else:
-				m[mk] = float(m[mk]) + float(umods[mk]) * lvl
+				m[mk] = float(m.get(mk, 0.0)) + float(umods[mk]) * lvl
 	var base: Dictionary = u["base"]
+	u["range"] = float(base["range"]) + float(m.get("range_add", 0.0)) + (HIGH_RANGE if u.get("high", false) and float(base["range"]) > 2.0 else 0.0)
 	u["armor"] = float(base["armor"]) + float(m["armor_add"])
 	u["damage"] = (float(base["damage"]) + float(m["damage_add"])) * float(m["damage_mul"])
 	u["attack_cooldown"] = float(base["attack_cooldown"]) * float(m["cooldown_mul"])
@@ -2483,6 +2960,9 @@ func load_state(d: Dictionary) -> void:
 	seed_value = int(d["seed"])
 	units = d["units"]
 	buildings = d["buildings"]
+	_bindex_dirty = true
+	for uid in units:      # сохранённые подсказки быстрого пересчёта после загрузки недействительны
+		(units[uid] as Dictionary).erase("_sk")
 	resources = d["resources"]
 	projectiles = d["projectiles"]
 	players = d["players"]
@@ -2562,6 +3042,7 @@ func _cmd_cancel(cmd: Dictionary) -> void:
 		p["wood"] += int(b["def"]["cost"].get("wood", 0)) * 3 / 4
 		_set_solid(_rect(b), false)
 		buildings.erase(b["id"])
+		_bindex_dirty = true
 		events.append({"type": "building_removed", "id": b["id"]})
 		return
 	var queue: Array = b["queue"]
@@ -2772,6 +3253,15 @@ func _cmd_research(cmd: Dictionary) -> void:
 	if p["research_wip"].has(key):
 		_msg(player, "Это улучшение уже исследуется")
 		return
+	if int(up.get("tier", 1)) > tier(player):
+		_msg(player, "Сначала улучшите главное здание (%s) до %d уровня" % [String(p["data"]["buildings"]["hall"]["name"]).to_lower(), int(up["tier"])])
+		return
+	if key == "tier" and level >= 1 and not _has_tier3_base(player):
+		var names: Array = []
+		for k in tier3_missing(player):
+			names.append(String(p["data"]["buildings"][k]["name"]).to_lower())
+		_msg(player, "Для третьего уровня постройте: %s" % ", ".join(names))
+		return
 	var cost := upgrade_cost(player, key)
 	if not can_afford(player, cost):
 		_msg(player, "Не хватает ресурсов")
@@ -2779,18 +3269,44 @@ func _cmd_research(cmd: Dictionary) -> void:
 	_pay(player, cost)
 	p["research_wip"][key] = true
 	var time: float = float(up.get("time", 40)) * (level + 1)
+	if up.has("times"):      # своё время для каждого уровня (главное здание)
+		time = float(up["times"][mini(level, (up["times"] as Array).size() - 1)])
 	(b["queue"] as Array).append({"key": key, "research": true, "left": time, "total": time, "hero": false, "revive": false})
 
 
-## Уровень главного здания игрока: 1 в начале, растёт улучшением «tier» в ратуше.
+## Уровень главного здания игрока: 1 в начале, растёт улучшением «tier» в ратуше (до 3).
 func tier(player: int) -> int:
 	return 1 + int(players[player]["upgrades"].get("tier", 0))
+
+
+## Что нужно построить для третьего уровня главного здания (ключи зданий, которых ещё нет).
+const TIER3_NEEDS := ["altar", "temple", "elite"]
+
+
+func tier3_missing(player: int) -> Array:
+	var have := {}
+	for id in buildings:
+		var b: Dictionary = buildings[id]
+		if int(b["player"]) == player and b["done"]:
+			have[String(b["key"])] = true
+	var out: Array = []
+	for k in TIER3_NEEDS:
+		if players[player]["data"]["buildings"].has(k) and not have.has(k):
+			out.append(k)
+	return out
+
+
+func _has_tier3_base(player: int) -> bool:
+	return tier3_missing(player).is_empty()
 
 
 ## Каждый следующий уровень улучшения дороже.
 func upgrade_cost(player: int, key: String) -> Dictionary:
 	var up: Dictionary = players[player]["data"]["upgrades"][key]
 	var n: int = int(players[player]["upgrades"].get(key, 0)) + 1
+	if up.has("costs"):      # своя цена для каждого уровня (главное здание)
+		var c: Dictionary = up["costs"][mini(n - 1, (up["costs"] as Array).size() - 1)]
+		return {"gold": int(c.get("gold", 0)), "wood": int(c.get("wood", 0))}
 	return {"gold": int(up["cost"].get("gold", 0)) * n, "wood": int(up["cost"].get("wood", 0)) * n}
 
 
@@ -2798,7 +3314,16 @@ func _finish_research(b: Dictionary, q: Dictionary) -> void:
 	var p: Dictionary = players[b["player"]]
 	p["research_wip"].erase(q["key"])
 	p["upgrades"][q["key"]] = int(p["upgrades"].get(q["key"], 0)) + 1
+	_up_ver[int(b["player"])] = int(_up_ver.get(int(b["player"]), 0)) + 1      # характеристики юнитов игрока пересчитаются
 	_msg(int(b["player"]), "Исследовано: %s, уровень %d" % [String(p["data"]["upgrades"][q["key"]]["name"]).to_lower(), int(p["upgrades"][q["key"]])])
+	var done_up: Dictionary = p["data"]["upgrades"][q["key"]]
+	var hp_add := float(done_up.get("mods", {}).get("hp_add", 0))
+	if hp_add > 0.0:      # закалка: уже нанятые бойцы тоже становятся крепче
+		for uid in units:
+			var hu: Dictionary = units[uid]
+			if int(hu["player"]) == int(b["player"]) and upgrade_applies(hu, done_up):
+				hu["max_hp"] = float(hu["max_hp"]) + hp_add
+				hu["hp"] = float(hu["hp"]) + hp_add
 	var bonus: float = float(p["data"]["upgrades"][q["key"]].get("hall_hp", 0))
 	if bonus > 0.0:     # улучшение главного здания укрепляет все ратуши игрока
 		for hid in buildings:
@@ -2848,6 +3373,9 @@ func _do_gather(u: Dictionary, o: Dictionary) -> void:
 			u["facing"] = ((r["pos"] as Vector2) - (u["pos"] as Vector2)).normalized()
 			o["phase"] = "work"
 			o["timer"] = GOLD_TIME if String(r["kind"]) == "gold" else WOOD_TIME
+			if String(r["kind"]) == "gold" and _wake_guards(r["pos"], GUARD_MINE_RADIUS, int(u["id"])) and tick - int(r.get("guard_msg", -9999)) > 150:
+				r["guard_msg"] = tick      # стража рудника ещё жива — она не даст красть золото
+				_msg(int(u["player"]), "Охрана рудника заметила вора и нападает!")
 		else:
 			_repath(u, _rect(r))
 		return
@@ -2856,7 +3384,7 @@ func _do_gather(u: Dictionary, o: Dictionary) -> void:
 	if float(o["timer"]) > 0.0:
 		return
 	var carry_key := "carry_gold" if String(r["kind"]) == "gold" else "carry_wood"
-	var amount: int = mini(int(u["def"].get(carry_key, 10)), int(r["amount"]))
+	var amount: int = mini(int(u["def"].get(carry_key, 10)) + (carry_bonus(u) if String(r["kind"]) == "gold" else 0), int(r["amount"]))
 	if not (String(r["kind"]) == "tree" and race_trait(int(u["player"]), "tree_friend")):
 		r["amount"] = int(r["amount"]) - amount      # эльфы берут у леса, не вырубая деревья
 	u["carry"] = amount
@@ -2912,6 +3440,7 @@ func _advance_build(b: Dictionary) -> bool:
 	b["hp"] = minf(float(b["max_hp"]), float(b["hp"]) + float(b["max_hp"]) * 0.9 * TICK_DT / bt)
 	if float(b["progress"]) >= 1.0:
 		b["done"] = true
+		_bindex_dirty = true
 		b.erase("auto")
 		players[b["player"]]["supply_cap"] += int(b["def"].get("supply_given", 0))
 		events.append({"type": "building_done", "id": b["id"]})
@@ -2993,11 +3522,25 @@ func _go_adjacent(u: Dictionary, rect: Rect2i) -> void:
 		_path_to(u, cell_center(best))
 
 
+var path_calls := 0      # замеры скорости: сколько путей проложено, сколько из них к недостижимой цели и сколько это стоило
+var path_us := 0
+var path_miss := 0
+var path_miss_us := 0
+
+
 func _path_to(u: Dictionary, dest: Vector2) -> void:
+	path_calls += 1
+	u.erase("chase")      # новый путь — уже не «погоня по старому маршруту» (см. _do_attack)
 	var swim := swims(u)
 	var start_cell := nearest_free_cell(to_cell(u["pos"]), {}, swim)
 	var goal := nearest_free_cell(to_cell(dest), {}, swim)
+	var pt0 := Time.get_ticks_usec()
 	var path: PackedVector2Array = _grid_for(swim).get_point_path(start_cell, goal, true)
+	var spent := Time.get_ticks_usec() - pt0
+	path_us += spent
+	if path.is_empty() or to_cell(path[path.size() - 1]) != goal:
+		path_miss += 1
+		path_miss_us += spent
 	# если цель недостижима (за обрывом, на острове), путь ведёт к ближайшей достижимой точке —
 	# и тогда точную точку цели подставлять нельзя: юнит пошёл бы к ней напрямую сквозь скалы
 	var reached := path.size() > 0 and to_cell(path[path.size() - 1]) == goal
@@ -3050,10 +3593,10 @@ func nearest_resource(kind: String, pos: Vector2, max_dist: float) -> int:
 func nearest_hall(u: Dictionary) -> int:
 	var best := -1
 	var best_d := INF
-	for id in buildings:
+	if _bindex_dirty:
+		_rebuild_bindex()
+	for id in _halls_of.get(int(u["player"]), []):
 		var b: Dictionary = buildings[id]
-		if int(b["player"]) != int(u["player"]) or not b["done"] or String(b["def"].get("role", "")) != "hall":
-			continue
 		var d: float = (b["pos"] as Vector2).distance_to(u["pos"])
 		if d < best_d:
 			best_d = d

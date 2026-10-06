@@ -1,4 +1,4 @@
-extends RefCounted
+﻿extends RefCounted
 ## Генератор случайной карты: базы, рудники, леса, лагеря нейтралов, нейтральные строения,
 ## вулкан с драконом в центре. Всё определяется зерном (одно число), поэтому карту можно повторить.
 ## Карта бывает трёх размеров: 96 (маленькая), 192 (×4 по площади) и 272 (×8),
@@ -31,6 +31,8 @@ static func generate(race_list: Array, neutral: Dictionary, combat: Dictionary, 
 			for y in map_size:
 				if terrain.blocked(Vector2i(x, y)):
 					sim.block_cell(Vector2i(x, y), terrain.swimmable(Vector2i(x, y)))
+				elif terrain.high_ground(Vector2i(x, y)):
+					sim.high_cells[Vector2i(x, y)] = true      # вершины возвышенностей
 		var ok := true
 		for i in n:
 			ok = ok and sim.can_place(8, Vector2i(terrain.bases[i]) - Vector2i(4, 4))
@@ -61,6 +63,8 @@ static func _fill(sim: Sim, terrain: Terrain, race_list: Array, neutral: Diction
 	for f in terrain.fords:
 		keep.append([f, 5.0])
 	keep.append([center, terrain.vol_out + 3.0])
+	for rp in terrain.ramp_spots():      # подъёмы на возвышенности не зарастают лесом
+		keep.append([rp, 3.5])
 	if terrain.plateau_r > 0.0:
 		keep.append([terrain.plateau_corner + terrain.fall_dir * (terrain.plateau_r + 3.0), 6.0])
 
@@ -142,6 +146,8 @@ static func _fill(sim: Sim, terrain: Terrain, race_list: Array, neutral: Diction
 		var sz := int(def["size"])
 		var bid := sim.spawn_building(Sim.NEUTRAL, String(st[1]), def, Vector2i(st[0]) - Vector2i(sz / 2, sz / 2))
 		sim.buildings[bid]["owner"] = -1
+		if String(def.get("role", "")) == "mercenary":
+			sim._merc_init(sim.buildings[bid])      # вид лагеря известен сразу (и для модели)
 		keep.append([st[0], 5.0])
 
 	# --- лагеря нейтралов: охрана рудников и шахт гоблинов, плюс случайные ---
@@ -236,9 +242,13 @@ static func _fill(sim: Sim, terrain: Terrain, race_list: Array, neutral: Diction
 			keep.append([p, 5.0])
 
 	# --- леса ---
-	for patch in int(30 * k * k * float(terrain.B["forest"])):      # в степи леса мало, осенью — больше
+	for patch in int(30 * k * k * 1.2):      # густота леса — по местности в точке: в степи мало, осенью больше
 		var c := Vector2(rng.randf_range(3, sim.map_size - 3), rng.randf_range(3, sim.map_size - 3))
-		_forest(sim, rng, c, rng.randi_range(10, 28), rng.randf_range(2.0, 3.6), keep)
+		var size := rng.randi_range(10, 28)
+		var spread := rng.randf_range(2.0, 3.6)
+		if rng.randf() > terrain.num(c, "forest") / 1.2:
+			continue
+		_forest(sim, rng, c, size, spread, keep)
 
 
 static func _near_base(terrain: Terrain, p: Vector2) -> float:

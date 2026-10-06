@@ -5,6 +5,38 @@
 	"traits": {"tree_friend": true},
 	"unit_traits": {"shadowmeld": true},
 	"units": {
+		"bear_druid": {
+			"name": "Друид-медведь", "role": "melee", "level": 3, "tier": 2,
+			"description": "Друид в облике медведя: могучие удары иногда оглушают врага, а раны затягиваются сами.",
+			"cost": {"gold": 220, "wood": 80}, "supply": 4, "build_time": 28,
+			"hp": 980, "damage": 25, "attack_cooldown": 1.5, "range": 0.7, "damage_type": "normal",
+			"armor": 3, "armor_type": "medium", "speed": 3.2, "radius": 0.68, "mana": 0, "mana_regen": 0,
+			"hp_regen": 1.5,
+			"bash": {"chance": 0.2, "stun": 1.0},
+			"model": {"shape": "wolf", "scale": 1.6, "fur": "#5e4430"},
+			"hotkey": "T"
+		},
+		"faerie_drake": {
+			"name": "Изумрудный дракончик", "role": "elite", "level": 5, "tier": 3,
+			"description": "Юный лесной дракон. Плюётся ядом: отравленный враг теряет 9 здоровья в секунду 5 с. Ловко уворачивается от ударов.",
+			"cost": {"gold": 270, "wood": 130}, "supply": 5, "build_time": 36,
+			"hp": 820, "damage": 26, "attack_cooldown": 1.7, "range": 6.0, "damage_type": "magic",
+			"armor": 1, "armor_type": "light", "speed": 3.6, "radius": 0.7, "mana": 0, "mana_regen": 0,
+			"projectile": "magic", "evasion": 0.15,
+			"poison": {"dps": 9, "duration": 5},
+			"model": {"shape": "dragon", "scale": 0.3, "color": "#3aa860"},
+			"hotkey": "E"
+		},
+		"blade_dancer": {
+			"name": "Танцующая с клинками", "role": "melee", "level": 4, "tier": 2,
+			"description": "Мастер двух клинков: уклоняется от трети ударов, а каждый пятый её удар в среднем — смертельный выпад (двойной урон).",
+			"cost": {"gold": 210, "wood": 60}, "supply": 3, "build_time": 26,
+			"hp": 560, "damage": 22, "attack_cooldown": 1.0, "range": 0.6, "damage_type": "normal",
+			"armor": 2, "armor_type": "light", "speed": 3.8, "radius": 0.42, "mana": 0, "mana_regen": 0,
+			"evasion": 0.3, "crit_chance": 0.2,
+			"model": {"shape": "humanoid", "scale": 1.05, "bulk": 0.85, "skin": "#ecc9a4", "cloth": "#3a2a5a", "pants": "#2a1a3a", "weapon": "sword", "head": "hood", "ears": true, "cape": true, "hair": "#e8f0ff"},
+			"hotkey": "Q"
+		},
 		"worker": {
 			"name": "Эльф-собиратель",
 			"role": "worker",
@@ -613,7 +645,8 @@
 			"trains": [
 				"melee",
 				"ranged",
-				"heavy"
+				"heavy",
+				"bear_druid"
 			]
 		},
 		"tower": {
@@ -705,7 +738,10 @@
 			},
 			"researches": [
 				"weapons",
-				"armor"
+				"armor",
+				"moon_arrows",
+				"swiftness",
+				"nature_bond"
 			]
 		},
 		"temple": {
@@ -723,6 +759,9 @@
 			"model": {"shape": "elf_shrine"},
 			"trains": ["moon_priestess", "dryad"]
 		},
+		"elite": {"name": "Лунный чертог", "role": "elite", "hotkey": "Y", "tier": 2, "cost": {"gold": 210, "wood": 140}, "build_time": 55, "hp": 1250, "armor": 4, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0,
+			"model": {"shape": "elf_lodge", "elite": true, "trim": "#cfe0ff"}, "trains": ["blade_dancer", "faerie_drake"],
+			"description": "Элитные казармы. Строятся после улучшения главного здания до 2 уровня; нужны для 3 уровня."},
 		"workshop": {
 			"name": "Мастерская древних",
 			"role": "workshop",
@@ -777,16 +816,24 @@
 			"hotkey": "E",
 			"icon": "aura",
 			"color": "#e0b84a",
-			"max": 1,
+			"max": 2,
 			"cost": {
 				"gold": 310,
 				"wood": 260
 			},
+			"costs": [{"gold": 310, "wood": 260}, {"gold": 680, "wood": 560}],
+			"times": [70, 100],
 			"time": 70,
 			"mods": {},
 			"hall_hp": 500,
-			"description": "Второй уровень главного здания. Открывает юнита «Древень» и найм второго героя, главное здание получает +500 прочности."
-		}
+			"description": "Уровень 2 (Древо веков): открывает «Древня», «Друида-медведя», «Баллисту», лунный чертог, «Связь с рощей» и второго героя.\nУровень 3 (Древо вечности): открывает «Изумрудного дракончика» и третьего героя. Нужны готовые круг друидов, святилище луны и лунный чертог.\nКаждый уровень: главное здание +500 прочности."
+		},
+		"moon_arrows": {"name": "Лунные стрелы", "hotkey": "R", "icon": "arrows", "color": "#cfe0ff", "max": 2, "cost": {"gold": 100, "wood": 90}, "time": 35,
+			"units": ["ranged", "dryad"], "mods": {"range_add": 0.75}, "description": "Следопыты и дриады стреляют дальше: +0,75 к дальности за уровень."},
+		"swiftness": {"name": "Лёгкий шаг", "hotkey": "T", "icon": "boot", "color": "#9fe86a", "max": 2, "cost": {"gold": 110, "wood": 90}, "time": 35,
+			"army": true, "mods": {"speed_mul": 1.05}, "description": "Все бойцы бегают на 5% быстрее за уровень."},
+		"nature_bond": {"name": "Связь с рощей", "hotkey": "F", "icon": "leaf", "color": "#5ad06a", "max": 2, "cost": {"gold": 130, "wood": 110}, "time": 40, "tier": 2,
+			"army": true, "mods": {"hp_regen": 0.5}, "description": "Все бойцы восстанавливают +0,5 здоровья в секунду за уровень."}
 	},
 	"start": {
 		"hall": "hall",

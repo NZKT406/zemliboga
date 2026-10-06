@@ -1,4 +1,4 @@
-extends RefCounted
+﻿extends RefCounted
 ## Low poly модели, собранные кодом из простых фигур.
 ## Вид юнита задаётся блоком "model" в таблице расы; вид здания — его "shape".
 ## У юнитов руки, ноги, голова и туловище — отдельные подвижные части:
@@ -20,8 +20,51 @@ static var _mats: Dictionary = {}
 ## Общая «грязная» гамма игры: цвета приглушаются, темнеют и слегка уходят в бурый.
 ## Меняя три числа здесь, можно перекрасить всю игру разом.
 static func grade(c: Color) -> Color:
+	if _unit_mode:      # юниты — сочнее мира вокруг: так их лучше видно на фоне земли и построек
+		var u := Color.from_hsv(c.h, minf(1.0, c.s * 0.82), c.v * (0.9 - 0.12 * c.v), c.a)      # светлое (сталь, кость) приглушаем сильнее, чтобы не «горело»
+		return u.lerp(Color(0.25, 0.22, 0.18, c.a), 0.05)
 	var out := Color.from_hsv(c.h, c.s * 0.58, c.v * 0.74, c.a)
 	return out.lerp(Color(0.25, 0.22, 0.18, c.a), 0.14)
+
+
+## Пока собирается модель юнита: свои цвета (сочнее) и свой материал (с контурным светом).
+static var _unit_mode := false
+static var _unit_team := Color.WHITE
+static var _unit_mats: Dictionary = {}
+
+const UNIT_SHADER := """
+shader_type spatial;
+render_mode specular_disabled;
+// Материал юнитов: цвет из вершин, мягкий контурный свет по краям фигуры (с оттенком цвета
+// команды) и немного «света неба» на всём, что смотрит вверх, — фигуры отделяются от земли.
+uniform vec3 team_color = vec3(1.0);
+uniform float rim_strength = 0.42;
+uniform float sky_strength = 0.07;
+void fragment() {
+	ALBEDO = COLOR.rgb;
+	ROUGHNESS = 1.0;
+	float ndv = clamp(dot(NORMAL, VIEW), 0.0, 1.0);
+	float rim = pow(1.0 - ndv, 3.0);
+	vec3 wn = (INV_VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz;
+	vec3 rim_col = mix(COLOR.rgb, team_color, 0.4);
+	EMISSION = rim_col * rim * rim_strength + COLOR.rgb * max(wn.y, 0.0) * sky_strength;
+}
+"""
+static var _unit_shader: Shader
+
+
+## Материал юнита для цвета команды (один на команду, общий для всех её юнитов).
+static func unit_material(team: Color) -> ShaderMaterial:
+	var key := team.to_html()
+	if not _unit_mats.has(key):
+		if _unit_shader == null:
+			_unit_shader = Shader.new()
+			_unit_shader.code = UNIT_SHADER
+		var m := ShaderMaterial.new()
+		m.shader = _unit_shader
+		m.set_shader_parameter("team_color", Vector3(team.r, team.g, team.b))
+		_unit_mats[key] = m
+	return _unit_mats[key]
 
 
 ## Небольшой разнобой в тоне соседних деталей, чтобы поверхности не были одноцветными.
@@ -32,7 +75,7 @@ static func _jitter(pos: Vector3) -> float:
 
 static func mat(color: Color, glow: bool = false) -> StandardMaterial3D:
 	color = grade(color) if not glow else Color.from_hsv(color.h, color.s * 0.85, color.v * 0.92, color.a)
-	var key := color.to_html() + ("g" if glow else "")
+	var key := color.to_html() + ("g" if glow else "") + ("u" if _unit_mode else "")
 	if not _mats.has(key):
 		var m := StandardMaterial3D.new()
 		m.albedo_color = color
@@ -40,7 +83,7 @@ static func mat(color: Color, glow: bool = false) -> StandardMaterial3D:
 		if glow:
 			m.emission_enabled = true
 			m.emission = color
-			m.emission_energy_multiplier = 1.4
+			m.emission_energy_multiplier = 0.9 if _unit_mode else 1.4      # у юнитов свечение мягче: не слепит в толпе
 		_mats[key] = m
 	return _mats[key]
 
@@ -110,7 +153,62 @@ static func _flag(parent: Node3D, base: Vector3, team: Color, h: float, size := 
 #  ЮНИТЫ
 # =====================================================================
 
+## Готовые модели по виду и цвету команды. Собрать и склеить модель — дорого (десятки мс
+## у сложных), поэтому каждая собирается один раз, а дальше копируется: копия делит с
+## образцом меши и материалы, а свои у неё только узлы.
+static var _unit_cache: Dictionary = {}
+
+
 static func unit(spec: Dictionary, team: Color) -> Node3D:
+	var key := "%s|%s" % [str(spec), team.to_html()]
+	if not _unit_cache.has(key):
+		var built := _build_unit(spec, team)
+		var n := 0
+		for node in built.find_children("*", "", true, false):      # постоянные имена: автоматические («@…») у копии другие
+			node.name = "p%d" % n
+			n += 1
+		var paths := {}      # подвижные части запоминаем путями: в копии это будут её собственные узлы
+		for k in (built.get_meta("parts") as Dictionary):
+			var val = built.get_meta("parts")[k]
+			if val is Node:
+				paths[k] = built.get_path_to(val)
+			elif val is Array:
+				var arr: Array = []
+				for item in val:
+					arr.append(built.get_path_to(item) if item is Node else item)
+				paths[k] = arr
+			else:
+				paths[k] = val
+		_unit_cache[key] = [built, paths]
+	var tpl: Array = _unit_cache[key]
+	var copy: Node3D = (tpl[0] as Node3D).duplicate()
+	var parts := {}
+	for k in (tpl[1] as Dictionary):
+		var val = tpl[1][k]
+		if val is NodePath:
+			parts[k] = copy.get_node(val)
+		elif val is Array:
+			var arr: Array = []
+			for item in val:
+				arr.append(copy.get_node(item) if item is NodePath else item)
+			parts[k] = arr
+		else:
+			parts[k] = val
+	copy.set_meta("parts", parts)
+	copy.set_meta("mkey", key)      # по нему кэшируется и склеенное тело павшего (см. main._flatten_corpse)
+	return copy
+
+
+static func _build_unit(spec: Dictionary, team: Color) -> Node3D:
+	_unit_mode = true
+	_unit_team = team
+	var root := _build_unit_body(spec, team)
+	_unit_mode = false
+	root.set_meta("umat", unit_material(team))      # им же рисуется склеенное тело павшего
+	return root
+
+
+static func _build_unit_body(spec: Dictionary, team: Color) -> Node3D:
 	var root: Node3D
 	if String(spec.get("shape", "humanoid")) == "wolf":
 		root = _wolf(spec)
@@ -124,6 +222,8 @@ static func unit(spec: Dictionary, team: Color) -> Node3D:
 		root = _ward(spec, team)
 	elif String(spec.get("shape", "")) == "spider":
 		root = _spider(spec)
+	elif String(spec.get("shape", "")) == "crab":
+		root = _crab(spec)
 	else:
 		root = _humanoid(spec, team)
 	if spec.get("glow", false):
@@ -146,7 +246,7 @@ static func _ghostly(node: Node) -> void:
 			m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 			m.emission_enabled = true
 			m.emission = old.albedo_color
-			m.emission_energy_multiplier = 0.9
+			m.emission_energy_multiplier = 0.45
 			(c as MeshInstance3D).material_override = m
 			(c as MeshInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		_ghostly(c)
@@ -258,17 +358,21 @@ static func _humanoid(spec: Dictionary, team: Color) -> Node3D:
 		wood_node.visible = false
 
 	# ----- голова -----
-	var hr := 0.13 if ogre else 0.15
+	var hr := 0.145 if ogre else 0.17      # голова чуть крупнее «по-настоящему»: сверху так лучше читается, кто есть кто
 	var head := pivot(torso, Vector3(0, torso_h + 0.02, 0))
 	if rocky:
 		box(head, Vector3(hr * 2.1, hr * 1.7, hr * 1.9), Vector3(0, hr * 0.85, 0), skin.lightened(0.08))
 		box(head, Vector3(hr * 1.2, hr * 0.5, hr * 1.2), Vector3(0, hr * 1.9, -0.02), Color("#5f8a3f"))
 	else:
 		ball(head, hr, Vector3(0, hr, 0), skin)
-	var eye := Color("#56e6ff") if rocky else Color("#22201e")
+	var eye := Color("#56e6ff") if rocky else Color("#1a1816")
 	for sx in [-1.0, 1.0]:
 		var x: float = sx
-		box(head, Vector3(0.035, 0.04, 0.03), Vector3(x * hr * 0.42, hr * 1.12, hr * 0.92), eye, Vector3.ZERO, rocky)
+		box(head, Vector3(0.045, 0.05, 0.03), Vector3(x * hr * 0.4, hr * 1.12, hr * 0.93), eye, Vector3.ZERO, rocky)
+		if not rocky:      # брови — лицо сразу «оживает»
+			box(head, Vector3(0.06, 0.018, 0.03), Vector3(x * hr * 0.42, hr * 1.4, hr * 0.9), skin.darkened(0.32), Vector3(0, 0, x * 0.08))
+	if not rocky and not ogre:      # нос
+		box(head, Vector3(0.045, 0.07, 0.06), Vector3(0, hr * 0.9, hr * 1.0), skin.darkened(0.1))
 	if ogre:
 		box(head, Vector3(hr * 1.6, hr * 0.62, hr * 1.35), Vector3(0, hr * 0.5, hr * 0.22), skin.darkened(0.1))
 		box(head, Vector3(hr * 1.5, hr * 0.2, hr * 0.4), Vector3(0, hr * 1.4, hr * 0.8), skin.darkened(0.22))
@@ -381,7 +485,7 @@ static func _humanoid(spec: Dictionary, team: Color) -> Node3D:
 		var arm := pivot(torso, Vector3(x * (w * 0.5 + aw * 0.45), torso_h - 0.05, 0))
 		box(arm, Vector3(aw, arm_len * 0.5, aw), Vector3(0, -arm_len * 0.25, 0), skin if bare else cloth)
 		box(arm, Vector3(aw * 0.9, arm_len * 0.46, aw * 0.9), Vector3(0, -arm_len * 0.72, 0), STEEL.darkened(0.1) if (armored and not ogre) else skin)
-		ball(arm, aw * (1.0 if weapon == "fists" else 0.62), Vector3(0, -arm_len, 0), skin)
+		ball(arm, aw * (1.05 if weapon == "fists" else 0.8), Vector3(0, -arm_len, 0), skin)      # кисти покрупнее
 		if armored and not ogre:
 			box(arm, Vector3(aw * 1.6, 0.11, aw * 1.7), Vector3(x * 0.02, 0.02, 0), team)
 			box(arm, Vector3(aw * 1.3, 0.05, aw * 1.4), Vector3(x * 0.03, 0.09, 0), STEEL)
@@ -401,6 +505,7 @@ static func _humanoid(spec: Dictionary, team: Color) -> Node3D:
 	var attack := "swing"
 	var wp := pivot(arm_r, Vector3(0, -arm_len, 0))
 	wp.rotation.x = -0.45
+	wp.scale = Vector3.ONE * 1.12      # оружие чуть крупнее — силуэт отряда читается издалека
 	match weapon:
 		"sword":
 			box(wp, Vector3(0.035, 0.1, 0.62), Vector3(0, 0, 0.42), STEEL)
@@ -485,6 +590,7 @@ static func _humanoid(spec: Dictionary, team: Color) -> Node3D:
 			box(bow, Vector3(0.012, 0.012, 0.74), Vector3(0, 0.1, 0), IVORY)
 	if spec.get("shield", false):
 		var sh := pivot(arm_l, Vector3(aw * 0.85, -arm_len * 0.62, 0.04))
+		sh.scale = Vector3.ONE * 1.1
 		box(sh, Vector3(0.05, 0.48, 0.38), Vector3.ZERO, team)
 		box(sh, Vector3(0.06, 0.4, 0.06), Vector3(0.01, 0, 0), STEEL)
 		box(sh, Vector3(0.06, 0.06, 0.32), Vector3(0.01, 0.04, 0), STEEL)
@@ -615,14 +721,66 @@ static func _spider(spec: Dictionary) -> Node3D:
 		for sx in [-1.0, 1.0]:
 			var x: float = sx
 			var leg := pivot(body, Vector3(x * 0.16, 0.45, 0.2 - k * 0.14))
-			var spread := (float(k) - 1.5) * 0.35
-			leg.rotation.y = spread * x * 0.6      # передние лапы смотрят вперёд, задние — назад
-			box(leg, Vector3(0.45, 0.05, 0.05), Vector3(x * 0.22, 0.12, (1.5 - k) * 0.12), c.darkened(0.1), Vector3(0, 0, -x * 0.5))
-			box(leg, Vector3(0.05, 0.5, 0.05), Vector3(x * 0.46, -0.1, (1.5 - k) * 0.22), c.darkened(0.25), Vector3(0, 0, x * 0.25))
+			leg.rotation.y = -x * (1.5 - float(k)) * 0.42      # передние лапы смотрят вперёд, задние — назад
+			_jointed_leg(leg, x, 0.42, 0.22, 0.75, -0.45, c.darkened(0.1), c.darkened(0.25))
 			legs.append(leg)
 	root.set_meta("parts", {
 		"kind": "quad", "body": body, "torso": torso, "head": head, "arm_l": null, "arm_r": null,
 		"legs": legs, "ammo": null, "attack": "bite", "gold": null, "wood": null, "scale": s, "height": 0.8 * s,
+	})
+	return root
+
+
+## Коленчатая лапа членистоногого: от бедра вверх к колену и оттуда вниз до земли.
+## Лапа смотрит вбок (x = ±1); колено (kx, ky) и стопа (fx, fy) — относительно бедра.
+static func _jointed_leg(leg: Node3D, x: float, kx: float, ky: float, fx: float, fy: float, upper: Color, lower: Color, thick := 0.06) -> void:
+	var a := Vector2(kx, ky)
+	box(leg, Vector3(a.length() + thick, thick, thick), Vector3(x * kx * 0.5, ky * 0.5, 0), upper, Vector3(0, 0, x * atan2(ky, kx)))
+	var d := Vector2(fx - kx, fy - ky)
+	box(leg, Vector3(thick * 0.85, d.length() + thick * 0.5, thick * 0.85), Vector3(x * (kx + fx) * 0.5, (ky + fy) * 0.5, 0), lower, Vector3(0, 0, x * atan2(d.x, -d.y)))
+	ball(leg, thick * 0.75, Vector3(x * kx, ky, 0), upper.darkened(0.15))      # сустав
+
+
+## Гигантский краб: широкий плоский панцирь, две большие клешни спереди,
+## по три ноги с каждой стороны и глаза на стебельках.
+static func _crab(spec: Dictionary) -> Node3D:
+	var root := Node3D.new()
+	var body := pivot(root, Vector3.ZERO)
+	body.name = "Body"
+	var s: float = float(spec.get("scale", 1.0))
+	body.scale = Vector3.ONE * s
+	var c := col(spec, "color", "#c0402a")
+	var belly := c.lightened(0.35)
+	var torso := pivot(body, Vector3(0, 0.42, 0))
+	ball(torso, 0.5, Vector3.ZERO, c, Vector3(1.25, 0.42, 0.95))      # панцирь
+	ball(torso, 0.42, Vector3(0, -0.08, 0), belly, Vector3(1.2, 0.3, 0.9))
+	for i in 3:      # бугорки на панцире
+		ball(torso, 0.07, Vector3((float(i) - 1.0) * 0.22, 0.2, -0.05), c.darkened(0.2))
+	var head := pivot(torso, Vector3(0, 0.05, 0.42))
+	for sx in [-1.0, 1.0]:      # глаза на стебельках
+		var x: float = sx
+		cyl(head, 0.025, 0.03, 0.22, Vector3(x * 0.12, 0.16, 0), c.darkened(0.1), 5)
+		ball(head, 0.055, Vector3(x * 0.12, 0.29, 0.02), Color("#1c1a18"))
+	var arms: Array = []
+	for sx in [-1.0, 1.0]:      # клешни: «руки», которыми краб бьёт
+		var x: float = sx
+		var arm := pivot(torso, Vector3(x * 0.42, 0.0, 0.3))
+		box(arm, Vector3(0.1, 0.1, 0.36), Vector3(x * 0.06, 0.0, 0.16), c.darkened(0.1), Vector3(0, x * 0.5, 0))
+		ball(arm, 0.17, Vector3(x * 0.2, 0.04, 0.42), c, Vector3(1.0, 0.75, 1.3))
+		cyl(arm, 0.0, 0.07, 0.3, Vector3(x * 0.17, 0.1, 0.62), c.lightened(0.15), 4, Vector3(PI / 2, 0, 0))
+		cyl(arm, 0.0, 0.06, 0.26, Vector3(x * 0.25, -0.03, 0.6), c.lightened(0.15), 4, Vector3(PI / 2, 0, 0))
+		arms.append(arm)
+	var legs: Array = []
+	for k in 3:
+		for sx in [-1.0, 1.0]:
+			var x: float = sx
+			var leg := pivot(body, Vector3(x * 0.48, 0.38, 0.1 - k * 0.2))
+			leg.rotation.y = -x * (1.0 - float(k)) * 0.45
+			_jointed_leg(leg, x, 0.24, 0.1, 0.44, -0.38, c.darkened(0.15), c.darkened(0.3), 0.08)
+			legs.append(leg)
+	root.set_meta("parts", {
+		"kind": "quad", "body": body, "torso": torso, "head": head, "arm_l": arms[0], "arm_r": arms[1],
+		"legs": legs, "ammo": null, "attack": "pinch", "gold": null, "wood": null, "scale": s, "height": 0.8 * s,
 	})
 	return root
 
@@ -791,7 +949,29 @@ static func _engine(spec: Dictionary, team: Color) -> Node3D:
 #  ЗДАНИЯ
 # =====================================================================
 
+static var _building_cache: Dictionary = {}
+
+
+## Выход из партии: образцы моделей больше не нужны (и не должны «утечь» при закрытии игры).
+static func clear_cache() -> void:
+	for tpl in _unit_cache.values():
+		if is_instance_valid(tpl[0]):
+			(tpl[0] as Node).free()
+	for tpl in _building_cache.values():
+		if is_instance_valid(tpl):
+			(tpl as Node).free()
+	_unit_cache.clear()
+	_building_cache.clear()
+
+
 static func building(spec: Dictionary, size: float, team: Color) -> Node3D:
+	var key := "%s|%s|%s" % [str(spec), size, team.to_html()]
+	if not _building_cache.has(key):
+		_building_cache[key] = _build_building(spec, size, team)
+	return (_building_cache[key] as Node3D).duplicate()
+
+
+static func _build_building(spec: Dictionary, size: float, team: Color) -> Node3D:
 	var root := Node3D.new()
 	match String(spec.get("shape", "farm")):
 		"townhall":
@@ -855,7 +1035,7 @@ static func building(spec: Dictionary, size: float, team: Color) -> Node3D:
 		"fountain":
 			_fountain(root)
 		"merc_camp":
-			_merc_camp(root, team)
+			_merc_camp(root, team, String(spec.get("theme", "")))
 		"lookout":
 			_lookout(root, team)
 		"merchant":
@@ -863,8 +1043,27 @@ static func building(spec: Dictionary, size: float, team: Color) -> Node3D:
 		_:
 			box(root, Vector3(size * 0.8, 1.0, size * 0.8), Vector3(0, 0.5, 0), STONE)
 			_flag(root, Vector3(0, 1.0, 0), team, 1.0)
+	if spec.get("elite", false):
+		_elite_trim(root, team, size, Color(String(spec.get("trim", "#e8c23a"))))
 	merge(root)
 	return root
+
+
+## Элитные казармы: то же здание, но с четырьмя угловыми башенками под золотыми шпилями,
+## знамёнами цвета игрока и светящимся гербом над входом — издалека видно, что это не простая казарма.
+static func _elite_trim(root: Node3D, team: Color, size: float, trim: Color) -> void:
+	var h := size * 0.5 - 0.22
+	for sx in [-1.0, 1.0]:
+		for sz in [-1.0, 1.0]:
+			var p := Vector3(float(sx) * h, 0.0, float(sz) * h)
+			cyl(root, 0.2, 0.24, 1.9, p + Vector3(0, 0.95, 0), STONE.darkened(0.1), 6)
+			box(root, Vector3(0.5, 0.12, 0.5), p + Vector3(0, 1.92, 0), STONE.darkened(0.25))
+			cyl(root, 0.0, 0.2, 0.7, p + Vector3(0, 2.33, 0), trim, 6)
+			ball(root, 0.07, p + Vector3(0, 2.72, 0), trim, Vector3.ONE, true)
+			box(root, Vector3(0.04, 0.5, 0.3), p + Vector3(float(sx) * 0.25, 1.4, 0), team)
+	box(root, Vector3(0.7, 0.7, 0.06), Vector3(0, 1.6, h + 0.25), DARKWOOD)
+	box(root, Vector3(0.5, 0.5, 0.08), Vector3(0, 1.6, h + 0.27), team)
+	ball(root, 0.14, Vector3(0, 1.6, h + 0.33), trim, Vector3.ONE, true)
 
 
 static func _window(root: Node3D, pos: Vector3, facing_x := false) -> void:
@@ -1855,8 +2054,8 @@ static func _lookout(root: Node3D, team: Color) -> void:
 
 
 ## Лагерь наёмников: два шатра, костёр, стойка с оружием, знамя.
-static func _merc_camp(root: Node3D, team: Color) -> void:
-	var cloth := Color("#8a3a2a")
+static func _merc_camp(root: Node3D, team: Color, theme := "") -> void:
+	var cloth: Color = {"trolls": Color("#3a6a5a"), "ogres": Color("#6a4a2a"), "goblins": Color("#5a6a2a"), "murlocs": Color("#2a5a7a")}.get(theme, Color("#8a3a2a"))
 	for t in [[Vector3(-0.7, 0, -0.5), 0.75], [Vector3(0.75, 0, -0.35), 0.6]]:
 		var p: Vector3 = t[0]
 		var r: float = t[1]
@@ -1869,8 +2068,42 @@ static func _merc_camp(root: Node3D, team: Color) -> void:
 		box(root, Vector3(0.04, 0.9, 0.04), Vector3(x, 0.45, 0.78), WOOD, Vector3(0.15, 0, 0))
 		box(root, Vector3(0.12, 0.25, 0.03), Vector3(x, 0.95, 0.8), STEEL)
 	box(root, Vector3(0.08, 2.2, 0.08), Vector3(-1.2, 1.1, 0.6), DARKWOOD)
-	box(root, Vector3(0.5, 0.7, 0.03), Vector3(-0.92, 1.8, 0.6), Color("#c9a23a"))
+	box(root, Vector3(0.5, 0.7, 0.03), Vector3(-0.92, 1.8, 0.6), cloth.lightened(0.3))
 	ball(root, 0.12, Vector3(-1.2, 2.25, 0.6), GOLD)
+	match theme:      # у каждого вида лагеря своё убранство
+		"bandits":      # телега с награбленным и сундук
+			box(root, Vector3(0.7, 0.3, 1.0), Vector3(1.1, 0.4, -1.0), WOOD)
+			for sz in [-0.35, 0.35]:
+				cyl(root, 0.2, 0.2, 0.06, Vector3(1.48, 0.2, -1.0 + sz), DARKWOOD, 8, Vector3(0, 0, PI / 2))
+			box(root, Vector3(0.36, 0.26, 0.26), Vector3(-0.2, 0.13, -1.15), Color("#6a3a1a"))
+			box(root, Vector3(0.38, 0.05, 0.28), Vector3(-0.2, 0.27, -1.15), GOLD)
+			ball(root, 0.09, Vector3(1.1, 0.62, -1.0), GOLD)
+		"trolls":      # тотемы с черепами и костяной частокол
+			for sx in [-1.0, 1.0]:
+				var tp := Vector3(float(sx) * 1.25, 0, -1.1)
+				cyl(root, 0.07, 0.09, 1.5, tp + Vector3(0, 0.75, 0), DARKWOOD, 6)
+				ball(root, 0.15, tp + Vector3(0, 1.55, 0), IVORY, Vector3(1, 1.1, 1.1))
+				box(root, Vector3(0.05, 0.05, 0.05), tp + Vector3(-0.05, 1.56, 0.13), Color("#1a1816"))
+				box(root, Vector3(0.05, 0.05, 0.05), tp + Vector3(0.05, 1.56, 0.13), Color("#1a1816"))
+				box(root, Vector3(0.3, 0.06, 0.04), tp + Vector3(0, 1.2, 0), Color("#c94a3a"))
+		"ogres":      # огромные кости и котёл
+			for i in 3:
+				cyl(root, 0.06, 0.06, 1.1, Vector3(-0.9 + i * 0.25, 0.1, -1.2), IVORY, 6, Vector3(0, 0.4 * i, PI / 2))
+			cyl(root, 0.35, 0.28, 0.4, Vector3(1.05, 0.2, -0.9), IRON.darkened(0.2), 8)
+			cyl(root, 0.3, 0.3, 0.03, Vector3(1.05, 0.41, -0.9), Color("#7a5a2a"), 8)
+		"goblins":      # ящики, бочки с порохом и пушечный ствол
+			for i in 3:
+				box(root, Vector3(0.34, 0.34, 0.34), Vector3(-1.0 + float(i % 2) * 0.36, 0.17 + float(i / 2) * 0.34, -1.1), WOOD.lightened(0.05 * i))
+			cyl(root, 0.16, 0.16, 0.4, Vector3(0.9, 0.2, -1.2), DARKWOOD, 8)
+			box(root, Vector3(0.1, 0.1, 0.1), Vector3(0.9, 0.42, -1.2), Color("#c94a2a"))
+			cyl(root, 0.11, 0.14, 0.9, Vector3(1.2, 0.3, -0.5), IRON, 8, Vector3(PI / 2 - 0.3, 0.5, 0))
+		"murlocs":      # лодка, сети на шестах, рыба
+			box(root, Vector3(0.5, 0.18, 1.3), Vector3(1.1, 0.1, -0.9), WOOD, Vector3(0, 0.3, 0))
+			for sx in [-0.5, 0.5]:
+				box(root, Vector3(0.04, 0.9, 0.04), Vector3(-1.0 + sx, 0.45, -1.2), DARKWOOD)
+			box(root, Vector3(1.0, 0.5, 0.02), Vector3(-1.0, 0.6, -1.2), Color("#b8b090"))
+			for i in 3:
+				box(root, Vector3(0.06, 0.18, 0.03), Vector3(-1.3 + i * 0.3, 0.55, -1.17), Color("#6a9ab0"))
 
 
 ## Деревьев на карте тысячи, а видов всего шесть. Каждый вид один раз сливается в одну сетку
@@ -1880,24 +2113,45 @@ static var _vc_material: StandardMaterial3D
 static var foliage := ""          # окраска листвы по местности: "", "autumn", "winter", "steppe"
 
 
-static func tree(seed_value: int) -> Node3D:
-	var key := (("leaf%d" % (seed_value % 4)) if seed_value % 3 == 0 else ("pine%d" % (seed_value % 3))) + foliage
+static func tree(seed_value: int, style = null) -> Node3D:
+	var root := Node3D.new()
+	var mi := MeshInstance3D.new()
+	mi.mesh = tree_mesh(seed_value, style)
+	mi.material_override = vc_material()
+	root.add_child(mi)
+	root.transform = tree_transform(seed_value, Vector3.ZERO)
+	return root
+
+
+## Вид дерева (лиственное или ель, оттенок, окраска местности) — по нему деревья группируются.
+## style — окраска листвы ("", autumn, winter, steppe); не задана — окраска всей карты (foliage).
+static func tree_key(seed_value: int, style = null) -> String:
+	var fol: String = foliage if style == null else String(style)
+	return (("leaf%d" % (seed_value % 4)) if seed_value % 3 == 0 else ("pine%d" % (seed_value % 3))) + fol
+
+
+static func tree_mesh(seed_value: int, style = null) -> Mesh:
+	var fol: String = foliage if style == null else String(style)
+	var key := tree_key(seed_value, fol)
 	if not _tree_meshes.has(key):
 		var parts := _tree_parts(seed_value)
-		_tree_meshes[key] = restyle(bake(parts), foliage, seed_value)
+		_tree_meshes[key] = restyle(bake(parts), fol, seed_value)
 		parts.free()
+	return _tree_meshes[key]
+
+
+## Поворот и размер дерева (у каждого свои, по зерну) и где оно стоит.
+static func tree_transform(seed_value: int, at: Vector3) -> Transform3D:
+	var basis := Basis(Vector3.UP, float(seed_value % 7)).scaled(Vector3.ONE * (0.85 + float(seed_value % 5) * 0.09))
+	return Transform3D(basis, at)
+
+
+static func vc_material() -> StandardMaterial3D:
 	if _vc_material == null:
 		_vc_material = StandardMaterial3D.new()
 		_vc_material.vertex_color_use_as_albedo = true
 		_vc_material.roughness = 1.0
-	var root := Node3D.new()
-	var mi := MeshInstance3D.new()
-	mi.mesh = _tree_meshes[key]
-	mi.material_override = _vc_material
-	root.add_child(mi)
-	root.scale = Vector3.ONE * (0.85 + float(seed_value % 5) * 0.09)
-	root.rotation.y = float(seed_value % 7)
-	return root
+	return _vc_material
 
 
 ## Перекрашивает зелень готовой сетки под местность: осенью — в рыжий и багряный,
@@ -1923,6 +2177,27 @@ static func restyle(mesh: ArrayMesh, style: String, salt: int = 0) -> ArrayMesh:
 	out.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	return out
 
+
+## Вся видимая модель (с её текущей позой) — в одну сетку с цветом в вершинах.
+## Нужна для неподвижного: так улёгшееся тело рисуется одним вызовом вместо десятка.
+static func flatten(node: Node3D, src: Node3D = null) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var any := false
+	var inv := node.global_transform.affine_inverse() if node.is_inside_tree() else Transform3D.IDENTITY
+	for g in (src if src != null else node).find_children("*", "MeshInstance3D", true, false):
+		var mi := g as MeshInstance3D
+		if mi.mesh == null or not mi.is_visible_in_tree():
+			continue
+		var xf: Transform3D = inv * mi.global_transform if node.is_inside_tree() else mi.transform
+		var tint: Color = (mi.material_override as StandardMaterial3D).albedo_color if mi.material_override is StandardMaterial3D else Color.WHITE
+		var use_vc: bool = mi.material_override is ShaderMaterial or (mi.material_override is StandardMaterial3D and (mi.material_override as StandardMaterial3D).vertex_color_use_as_albedo)
+		for s in mi.mesh.get_surface_count():
+			_st_add(st, mi.mesh.surface_get_arrays(s), tint, use_vc, xf)
+			any = true
+	if not any:
+		return ArrayMesh.new()
+	return st.commit()
 
 ## Сливает все детали модели (простые фигуры) в одну сетку; цвет детали уходит в цвет вершин.
 static func bake(parts: Node3D) -> ArrayMesh:
@@ -1952,15 +2227,11 @@ static func merge(node: Node, keep: Array = []) -> void:
 	for c in node.get_children():
 		if c is Node3D and not group.has(c):
 			merge(c, keep)
-	if group.size() < 2:
+	if group.size() < (1 if _unit_mode else 2):      # у юнита и одиночная деталь получает общий материал (контурный свет)
 		return
-	if _vc_material == null:
-		_vc_material = StandardMaterial3D.new()
-		_vc_material.vertex_color_use_as_albedo = true
-		_vc_material.roughness = 1.0
 	var mi := MeshInstance3D.new()
 	mi.mesh = _bake_list(group)
-	mi.material_override = _vc_material
+	mi.material_override = unit_material(_unit_team) if _unit_mode else vc_material()
 	node.add_child(mi)
 	for c in group:
 		node.remove_child(c)
@@ -1968,39 +2239,58 @@ static func merge(node: Node, keep: Array = []) -> void:
 
 
 static func _bake_list(list: Array) -> ArrayMesh:
-	var verts := PackedVector3Array()
-	var normals := PackedVector3Array()
-	var colors := PackedColorArray()
-	var indices := PackedInt32Array()
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var any := false
 	for child in list:
 		var mi: MeshInstance3D = child
 		var arrays: Array = (mi.mesh as PrimitiveMesh).get_mesh_arrays()
-		var xf: Transform3D = mi.transform
 		var color: Color = (mi.material_override as StandardMaterial3D).albedo_color if mi.material_override is StandardMaterial3D else Color.WHITE
-		var base := verts.size()
-		var v: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
-		var n: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
-		for i in v.size():
-			verts.append(xf * v[i])
-			normals.append((xf.basis * n[i]).normalized())
-			colors.append(color)
-		var idx = arrays[Mesh.ARRAY_INDEX]
-		if idx is PackedInt32Array and not (idx as PackedInt32Array).is_empty():
-			for i in idx:
-				indices.append(base + int(i))
-		else:
-			for i in v.size():
-				indices.append(base + i)
-	var out := []
-	out.resize(Mesh.ARRAY_MAX)
-	out[Mesh.ARRAY_VERTEX] = verts
-	out[Mesh.ARRAY_NORMAL] = normals
-	out[Mesh.ARRAY_COLOR] = colors
-	out[Mesh.ARRAY_INDEX] = indices
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, out)
-	return mesh
+		_st_add(st, arrays, color, false, mi.transform)
+		any = true
+	if not any:
+		return ArrayMesh.new()
+	return st.commit()
 
+
+## Добавляет деталь в общую сетку. Перенос вершин и сдвиг индексов делает движок
+## (SurfaceTool.append_from), а не цикл скрипта: склейка модели — в десятки раз быстрее.
+## Цвет детали уходит в цвет вершин (или берётся её собственный, если он уже в вершинах).
+static func _st_add(st: SurfaceTool, arrays: Array, color: Color, keep_vc: bool, xf: Transform3D) -> void:
+	var v: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	if v.is_empty():
+		return
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = v
+	var n = arrays[Mesh.ARRAY_NORMAL]
+	if n is PackedVector3Array and (n as PackedVector3Array).size() == v.size():
+		arr[Mesh.ARRAY_NORMAL] = n
+	else:
+		var up := PackedVector3Array()
+		up.resize(v.size())
+		up.fill(Vector3.UP)
+		arr[Mesh.ARRAY_NORMAL] = up
+	var c = arrays[Mesh.ARRAY_COLOR]
+	if keep_vc and c is PackedColorArray and (c as PackedColorArray).size() == v.size():
+		arr[Mesh.ARRAY_COLOR] = c
+	else:
+		var fillc := PackedColorArray()
+		fillc.resize(v.size())
+		fillc.fill(Color(color.r, color.g, color.b, 1.0))
+		arr[Mesh.ARRAY_COLOR] = fillc
+	var idx = arrays[Mesh.ARRAY_INDEX]
+	if idx is PackedInt32Array and not (idx as PackedInt32Array).is_empty():
+		arr[Mesh.ARRAY_INDEX] = idx
+	else:
+		var seq := PackedInt32Array()
+		seq.resize(v.size())
+		for i in v.size():
+			seq[i] = i
+		arr[Mesh.ARRAY_INDEX] = seq
+	var tmp := ArrayMesh.new()
+	tmp.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	st.append_from(tmp, 0, xf)
 
 static func _tree_parts(seed_value: int) -> Node3D:
 	var root := Node3D.new()
@@ -2060,4 +2350,5 @@ static func gold_mine(size: float) -> Node3D:
 	box(root, Vector3(0.3, 0.05, 0.05), Vector3(0.62, 1.28, 1.2), DARKWOOD)
 	box(root, Vector3(0.12, 0.16, 0.12), Vector3(0.5, 1.16, 1.2), Color("#ffd94a"), Vector3.ZERO, true)
 	root.scale = Vector3.ONE * k
+	merge(root)      # около 50 деталей — в одну сетку (светящиеся остаются отдельно)
 	return root

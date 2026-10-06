@@ -4,6 +4,37 @@
 	"description": "Орда: мало дорогих, сильных и живучих юнитов. Каждый удар разжигает ярость (бьют всё чаще и сильнее), а добитый враг возвращает огру силы. Кузницы нет — оружие и доспехи куют прямо в логове.",
 	"unit_traits": {"rage": true, "feast": true},
 	"units": {
+		"boar": {
+			"name": "Боевой вепрь", "role": "melee", "level": 3, "tier": 2,
+			"description": "Злой клыкастый вепрь. Натиск: врезается с разбега — двойной урон и оглушение. Как и все огры, впадает в ярость.",
+			"cost": {"gold": 195, "wood": 40}, "supply": 3, "build_time": 24,
+			"hp": 720, "damage": 21, "attack_cooldown": 1.25, "range": 0.6, "damage_type": "normal",
+			"armor": 2, "armor_type": "medium", "speed": 4.2, "radius": 0.6, "mana": 0, "mana_regen": 0,
+			"charge": {"mul": 2.0, "stun": 0.8, "after": 1.5},
+			"model": {"shape": "wolf", "scale": 1.45, "fur": "#6a4632"},
+			"hotkey": "T"
+		},
+		"ogre_mage": {
+			"name": "Огр-маг", "role": "elite", "level": 5, "tier": 3,
+			"description": "Огромный огр-колдун. Метает огненные сгустки и сам накладывает на дерущихся союзников «Жажду крови»: атаки на 25% чаще и бег +10% на 15 с.",
+			"cost": {"gold": 280, "wood": 110}, "supply": 6, "build_time": 38,
+			"hp": 1050, "damage": 30, "attack_cooldown": 1.9, "range": 6.0, "damage_type": "magic",
+			"armor": 2, "armor_type": "medium", "speed": 2.8, "radius": 0.65, "mana": 0, "mana_regen": 0,
+			"projectile": "magic",
+			"autocast": {"kind": "buff", "buff": "bloodlust", "range": 7.0, "cooldown": 6, "duration": 15, "color": "#ff5a3a", "mods": {"cooldown_mul": 0.8, "speed_mul": 1.1}},
+			"model": {"shape": "humanoid", "scale": 1.55, "bulk": 1.6, "skin": "#7a8acb", "cloth": "#5a2a6a", "pants": "#3a1a4a", "weapon": "staff", "head": "horned", "ogre": true, "robe": true, "orb": "#ff5a3a"},
+			"hotkey": "E"
+		},
+		"ironhide": {
+			"name": "Огр-панцирник", "role": "heavy", "level": 4, "tier": 2,
+			"description": "Огр в шипастых железных пластинах. Медленный, но почти непробиваемый: кто бьёт его вблизи, сам получает четверть урона.",
+			"cost": {"gold": 300, "wood": 80}, "supply": 6, "build_time": 32,
+			"hp": 1350, "damage": 34, "attack_cooldown": 1.8, "range": 0.8, "damage_type": "normal",
+			"armor": 8, "armor_type": "heavy", "speed": 2.5, "radius": 0.68, "mana": 0, "mana_regen": 0,
+			"thorns": 0.25,
+			"model": {"shape": "humanoid", "scale": 1.6, "bulk": 1.8, "skin": "#8fa35a", "cloth": "#6e737a", "pants": "#4a4a50", "weapon": "hammer", "head": "helmet", "ogre": true, "armored": true, "shield": true},
+			"hotkey": "Q"
+		},
 		"worker": {
 			"name": "Огр-работяга",
 			"role": "worker",
@@ -577,7 +608,8 @@
 			"trains": [
 				"melee",
 				"ranged",
-				"heavy"
+				"heavy",
+				"boar"
 			]
 		},
 		"tower": {
@@ -664,8 +696,12 @@
 			"mana": 0,
 			"mana_regen": 0,
 			"model": {"shape": "ogre_hut"},
-			"trains": ["witch_doctor", "berserker"]
+			"trains": ["witch_doctor", "berserker"],
+			"researches": ["war_paint", "boulders", "fury"]
 		},
+		"elite": {"name": "Арена вождей", "role": "elite", "hotkey": "Y", "tier": 2, "cost": {"gold": 240, "wood": 130}, "build_time": 60, "hp": 1800, "armor": 6, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0,
+			"model": {"shape": "ogre_pit", "elite": true, "trim": "#ff7a3a"}, "trains": ["ironhide", "ogre_mage"],
+			"description": "Элитные казармы. Строятся после улучшения главного здания до 2 уровня; нужны для 3 уровня."},
 		"workshop": {
 			"name": "Двор разрушителей",
 			"role": "workshop",
@@ -775,15 +811,23 @@
 			"hotkey": "E",
 			"icon": "aura",
 			"color": "#e0b84a",
-			"max": 1,
+			"max": 2,
 			"cost": {
 				"gold": 380,
 				"wood": 240
 			},
+			"costs": [{"gold": 380, "wood": 240}, {"gold": 820, "wood": 520}],
+			"times": [70, 100],
 			"time": 70,
 			"mods": {},
 			"hall_hp": 650,
-			"description": "Второй уровень главного здания. Открывает юнита «Огр-великан» и найм второго героя, главное здание получает +650 прочности."
-		}
+			"description": "Уровень 2 (Твердыня): открывает «Огра-великана», «Боевого вепря», «Стенобой», арену вождей, «Неистовство» и второго героя.\nУровень 3 (Цитадель вождя): открывает «Огра-мага» и третьего героя. Нужны готовые тотем вождей, хижина знахаря и арена вождей.\nКаждый уровень: главное здание +650 прочности."
+		},
+		"war_paint": {"name": "Боевая раскраска", "hotkey": "T", "icon": "regen", "color": "#e05a3a", "max": 2, "cost": {"gold": 110, "wood": 70}, "time": 35,
+			"army": true, "mods": {"hp_regen": 0.6}, "description": "Все бойцы восстанавливают +0,6 здоровья в секунду за уровень."},
+		"boulders": {"name": "Тяжёлые валуны", "hotkey": "F", "icon": "stomp", "color": "#b0a080", "max": 2, "cost": {"gold": 120, "wood": 80}, "time": 35,
+			"units": ["ranged"], "mods": {"damage_mul": 1.12}, "description": "Метатели камней бьют на 12% сильнее за уровень."},
+		"fury": {"name": "Неистовство", "hotkey": "G", "icon": "fang", "color": "#ff5a3a", "max": 2, "cost": {"gold": 140, "wood": 90}, "time": 40, "tier": 2,
+			"units": ["melee", "heavy", "berserker", "boar", "ironhide"], "mods": {"cooldown_mul": 0.94}, "description": "Громилы, великаны, берсерки, вепри и панцирники атакуют на 6% чаще за уровень."}
 	}
 }

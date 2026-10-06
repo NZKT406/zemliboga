@@ -1,4 +1,4 @@
-extends Node3D
+﻿extends Node3D
 ## Всё, что видит и нажимает игрок: меню, камера, выделение, приказы, интерфейс.
 ## Сама игра считается в Sim (scripts/sim.gd); здесь её только показывают.
 
@@ -55,7 +55,11 @@ var sel_building := -1            # или одно выбранное здан�
 var inspect := -1                 # или чужой юнит, которого просто рассматривают
 var views: Dictionary = {}        # id юнита -> {node, parts, ring, ...}
 var bviews: Dictionary = {}       # id здания -> Node3D
-var rviews: Dictionary = {}       # id ресурса -> Node3D
+var rviews: Dictionary = {}       # id ресурса -> Node3D (рудники и «вынутые» из пачек деревья)
+var _bframe := 0                  # счётчик кадров для поочерёдной проверки зданий
+var _tree_fol: Dictionary = {}    # id дерева -> окраска листвы (для мини-карты)
+var _tree_slot: Dictionary = {}   # id дерева -> [MultiMesh, номер в пачке, положение]: пока дерево не трогали, оно рисуется пачкой
+const TREE_CHUNK := 32            # деревья группируются по участкам 32×32 клетки: невидимые участки не рисуются
 var pviews: Dictionary = {}       # id снаряда -> Node3D
 var corpses: Array = []           # погибшие юниты, доигрывающие анимацию
 var floaters: Array = []          # всплывающие надписи «+30»
@@ -216,6 +220,7 @@ func _start_server() -> void:
 
 ## Сцена уходит (выход в меню): отцепляемся от сетевых сигналов, которые переживут нас.
 func _exit_tree() -> void:
+	Models.clear_cache()
 	for src in [online, multiplayer]:
 		if src == null:
 			continue
@@ -252,6 +257,8 @@ func _load_data() -> void:
 	_lookup["chill"] = {"name": "Холод глубин", "icon": "snow", "color": "#7fd0e8"}
 	_lookup["rage"] = {"name": "Ярость орды: удары чаще и сильнее", "icon": "fire", "color": "#ff3a1a"}
 	_lookup["militia"] = {"name": "Ополчение: +12 урона, +3 брони", "icon": "cry", "color": "#ff9a3a"}
+	_lookup["bloodlust"] = {"name": "Жажда крови: атаки чаще, бег быстрее", "icon": "fang", "color": "#ff5a3a"}
+	_lookup["poison"] = {"name": "Отравлен: теряет здоровье", "icon": "skull", "color": "#8aff5a"}
 	for rkey in Sim.RUNE_INFO:      # усиления от рун
 		_lookup["rune_" + String(rkey)] = {"name": Sim.RUNE_INFO[rkey]["name"], "icon": "rune", "color": Sim.RUNE_INFO[rkey]["color"]}
 
@@ -767,7 +774,8 @@ func _slot_text(slot: int) -> String:
 
 # ---------- настройки (хранятся в отдельном файле и переживают перезапуск) ----------
 
-var settings := {"fullscreen": false, "volume": 80, "hints": true, "show_fps": true, "server": "", "login": "", "fog": true, "biome": "any"}
+var settings := {"fullscreen": false, "volume": 80, "hints": true, "show_fps": true, "server": "", "login": "", "fog": true, "biome": "any", "quality": "high"}
+const QUALITY := {"high": "Высокое", "medium": "Среднее", "low": "Низкое"}
 
 
 func _load_settings() -> void:
@@ -787,6 +795,8 @@ func _apply_settings(save: bool = true) -> void:
 		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN if settings["fullscreen"] else DisplayServer.WINDOW_MODE_WINDOWED)
 	audio.enabled = int(settings["volume"]) > 0
 	audio.gain_db = linear_to_db(maxf(0.01, float(settings["volume"]) / 80.0))
+	if sim != null and _sun != null:
+		_apply_quality()
 	if save:
 		var cfg := ConfigFile.new()
 		for key in settings:
@@ -819,6 +829,14 @@ func _settings_box(parent: Control) -> void:
 		settings["show_fps"] = on
 		_apply_settings())
 	parent.add_child(fps)
+	parent.add_child(_note_label("Качество графики", Color.WHITE))
+	var qopts: Array = []
+	for qk in QUALITY:
+		qopts.append([qk, QUALITY[qk]])
+	parent.add_child(_toggle_row(qopts, String(settings.get("quality", "high")), func(v) -> void:
+		settings["quality"] = String(v)
+		_apply_settings(), 340.0, 15))
+	parent.add_child(_note_label("Среднее — тени проще, травы вдвое меньше. Низкое — без теней, травы и свечения, для слабых компьютеров."))
 	var vl := Label.new()
 	vl.text = "Громкость звука: %d" % int(settings["volume"])
 	vl.add_theme_font_size_override("font_size", 20)
@@ -1103,6 +1121,8 @@ func _start_loaded(slot: int = 1) -> void:
 		for y in sim.map_size:
 			if terrain.blocked(Vector2i(x, y)):
 				sim.block_cell(Vector2i(x, y), terrain.swimmable(Vector2i(x, y)))
+			elif terrain.high_ground(Vector2i(x, y)):
+				sim.high_cells[Vector2i(x, y)] = true
 	sim.load_state(state)
 	_make_ais(data.get("ai", {}))
 	_build_world()
@@ -1189,14 +1209,37 @@ func _build_world() -> void:
 	_range_ring.visible = false
 	add_child(_range_ring)
 
+	_tree_slot.clear()
+	var groups: Dictionary = {}      # "участок|вид" -> [[id, положение], ...]
 	for id in sim.resources:
 		var r: Dictionary = sim.resources[id]
-		var node: Node3D = Models.tree(int(id) * 31 + r["cell"].x) if r["kind"] == "tree" else Models.gold_mine(float(r["size"]))
+		if r["kind"] == "tree":      # деревья рисуются пачками (MultiMesh) по участкам карты
+			var seed_t: int = int(id) * 31 + int(r["cell"].x)
+			var fol := terrain.foliage_at(r["pos"])      # листва по зоне: осенний лес, заснеженный ельник…
+			var gk := "%d,%d|%s" % [int(r["cell"].x) / TREE_CHUNK, int(r["cell"].y) / TREE_CHUNK, Models.tree_key(seed_t, fol)]
+			if not groups.has(gk):
+				groups[gk] = []
+			(groups[gk] as Array).append([int(id), Models.tree_transform(seed_t, _at(r["pos"], -0.05)), seed_t, fol])
+			_tree_fol[int(id)] = fol
+			continue
+		var node: Node3D = Models.gold_mine(float(r["size"]))
 		node.position = _at(r["pos"], -0.05)
-		if r["kind"] == "gold":
-			node.rotation.y = _face_angle(r["pos"])
+		node.rotation.y = _face_angle(r["pos"])
 		add_child(node)
 		rviews[id] = node
+	for gk in groups:
+		var list: Array = groups[gk]
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = Models.tree_mesh(int(list[0][2]), list[0][3])
+		mm.instance_count = list.size()
+		for i in list.size():
+			mm.set_instance_transform(i, list[i][1])
+			_tree_slot[list[i][0]] = [mm, i, list[i][1], list[i][2], list[i][3]]
+		var mmi := MultiMeshInstance3D.new()
+		mmi.multimesh = mm
+		mmi.material_override = Models.vc_material()
+		add_child(mmi)
 	for id in sim.loot:
 		_make_loot_view(int(id))
 	for id in sim.runes:
@@ -1208,6 +1251,45 @@ func _build_world() -> void:
 		_make_building_view(sim.buildings[id])
 	for id in sim.units:
 		_make_unit_view(sim.units[id])
+	# заранее (понемногу в каждом кадре) собираем модели всех юнитов и зданий игроков,
+	# чтобы первый нанятый юнит нового вида не вызывал заминку в разгар боя
+	_prewarm.clear()
+	for p in sim.players:
+		if int(p) == Sim.NEUTRAL:
+			continue
+		var data: Dictionary = sim.players[p]["data"]
+		for group in ["units", "summons"]:
+			for k in data.get(group, {}):
+				_prewarm.append(["unit", data[group][k].get("model", {}), _team(int(p))])
+		for k in data["buildings"]:
+			_prewarm.append(["building", data["buildings"][k].get("model", {}), _team(int(p)), float(data["buildings"][k].get("size", 2))])
+	_apply_quality()
+
+
+## Качество графики (настройки): тени, трава, свечение, разрешение трёхмерной картинки.
+##   высокое — всё; среднее — тени ближе и проще, половина травы; низкое — без теней, травы
+##   и свечения, картинка в 75% разрешения (интерфейс остаётся чётким) — для слабых компьютеров.
+func _apply_quality() -> void:
+	var q := String(settings.get("quality", "high"))
+	_sun.shadow_enabled = q != "low"
+	_sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS      # для вида сверху двух ступеней хватает
+	_sun.directional_shadow_max_distance = 60.0 if q == "high" else 42.0
+	_env.glow_enabled = q != "low"
+	if _vignette_rect != null:
+		_vignette_rect.visible = q != "low"
+	terrain.set_prop_density(1.0 if q == "high" else (0.5 if q == "medium" else 0.0))
+	get_viewport().scaling_3d_scale = 0.75 if q == "low" else 1.0
+
+
+var _prewarm: Array = []      # модели, которые ещё надо собрать заранее: [вид, описание, цвет(, размер)]
+
+
+func _prewarm_step() -> void:
+	var start := Time.get_ticks_usec()
+	while not _prewarm.is_empty() and Time.get_ticks_usec() - start < 3000:
+		var job: Array = _prewarm.pop_back()
+		var made: Node3D = Models.unit(job[1], job[2]) if job[0] == "unit" else Models.building(job[1], float(job[3]), job[2])
+		made.free()
 
 
 ## Свой или союзный игрок: его всё видно и в тумане войны.
@@ -1285,7 +1367,11 @@ func _building_facing(pos: Vector2) -> float:
 
 func _make_building_view(b: Dictionary) -> void:
 	var owner := int(b.get("owner", -1))      # захваченная шахта — в цвете хозяина
-	var node := Models.building(b["def"].get("model", {}), float(b["size"]), _team(owner if owner >= 0 else int(b["player"])))
+	var spec: Dictionary = b["def"].get("model", {})
+	if b.has("merc"):      # лагерь наёмников: убранство по виду лагеря
+		spec = spec.duplicate()
+		spec["theme"] = String(b["merc"])
+	var node := Models.building(spec, float(b["size"]), _team(owner if owner >= 0 else int(b["player"])))
 	node.position = _at(b["pos"], -0.08)
 	node.rotation.y = _building_facing(b["pos"])
 	add_child(node)
@@ -1293,11 +1379,45 @@ func _make_building_view(b: Dictionary) -> void:
 	terrain.clear_rect(Rect2i(b["cell"], Vector2i(int(b["size"]), int(b["size"]))))
 
 
+var _blob_mesh: PlaneMesh       # мягкое пятно тени под ногами (одно на всех)
+
+
+## Мягкая тень-пятно под юнитом: «сажает» его на землю (особенно без настоящих теней).
+func _blob(node: Node3D, radius: float) -> void:
+	if _blob_mesh == null:
+		var g := Gradient.new()
+		g.set_color(0, Color(0, 0, 0, 0.55))
+		g.set_color(1, Color(0, 0, 0, 0.0))
+		var tex := GradientTexture2D.new()
+		tex.gradient = g
+		tex.fill = GradientTexture2D.FILL_RADIAL
+		tex.fill_from = Vector2(0.5, 0.5)
+		tex.fill_to = Vector2(1.0, 0.5)
+		tex.width = 64
+		tex.height = 64
+		var m := StandardMaterial3D.new()
+		m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		m.albedo_texture = tex
+		m.render_priority = -1
+		_blob_mesh = PlaneMesh.new()
+		_blob_mesh.size = Vector2(2, 2)
+		_blob_mesh.material = m
+	var b := MeshInstance3D.new()
+	b.mesh = _blob_mesh
+	b.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	b.position.y = 0.04
+	b.scale = Vector3(radius, 1.0, radius)
+	node.add_child(b)
+
+
 func _make_unit_view(u: Dictionary) -> void:
 	var node := Models.unit(u["def"].get("model", {}), _team(int(u["player"])))
 	node.position = _at(u["pos"])
 	node.rotation.y = atan2(u["facing"].x, u["facing"].y)
 	add_child(node)
+	if String(u["def"].get("role", "")) != "ward":
+		_blob(node, float(u["radius"]) * 1.7 + 0.15)
 	var r: float = float(u["radius"]) + 0.15
 	var ring := _torus(r, 0.06, Color("#3cff5a"), 20)
 	ring.position.y = 0.1
@@ -1345,7 +1465,10 @@ func _build_hud() -> void:
 	_bars = Control.new()
 	_bars.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_bars.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_bars.draw.connect(_draw_bars)
+	_bars.draw.connect(func() -> void:
+		var q := Time.get_ticks_usec()
+		_draw_bars()
+		_pt("draw_bars", q))
 	_ui.add_child(_bars)
 
 	var menu_btn := Button.new()
@@ -1545,7 +1668,10 @@ func _build_hud() -> void:
 	_mini = Control.new()
 	_mini.custom_minimum_size = Vector2(MINI_SIZE, MINI_SIZE)
 	_mini.clip_contents = true
-	_mini.draw.connect(_draw_mini)
+	_mini.draw.connect(func() -> void:
+		var q := Time.get_ticks_usec()
+		_draw_mini()
+		_pt("draw_mini", q))
 	_mini.gui_input.connect(_mini_input)
 	mini_panel.add_child(_mini)
 	_mini_tex = _make_mini_texture()
@@ -1563,7 +1689,10 @@ func _build_hud() -> void:
 	_mini_top = Control.new()      # рамка обзора и метки — поверх тумана
 	_mini_top.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_mini_top.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_mini_top.draw.connect(_draw_mini_top)
+	_mini_top.draw.connect(func() -> void:
+		var q := Time.get_ticks_usec()
+		_draw_mini_top()
+		_pt("draw_mini_top", q))
 	_mini.add_child(_mini_top)
 	_idle_btn = Button.new()
 	_idle_btn.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
@@ -1680,7 +1809,11 @@ func _make_mini_texture() -> ImageTexture:
 	for y in n:
 		for x in n:
 			var p := Vector2(x + 0.5, y + 0.5)
-			var c := Color(String(terrain.B["grass"][0])).darkened(0.05).lerp(Color(String(terrain.B["grass"][1])), clampf(terrain.height(p) / 1.5, 0.0, 1.0))
+			var c := terrain.pal(p, "grass", 0).darkened(0.05).lerp(terrain.pal(p, "grass", 1), clampf(terrain.h_at(p) / 1.5, 0.0, 1.0))
+			if terrain.mesa_wall(p):
+				c = Color("#4a463e")      # обрыв возвышенности
+			elif terrain.mesa(p) > 1.2:
+				c = c.lightened(0.12)      # вершина
 			if terrain.plateau(p) > 0.4:
 				c = Color("#5a564f")
 			elif terrain.water_dist(p) < 0.4:
@@ -1699,11 +1832,11 @@ func _make_mini_texture() -> ImageTexture:
 ## Деревья и рудники запекаются в картинку мини-карты (а не рисуются каждый кадр по одному).
 func _bake_mini() -> void:
 	var img: Image = _mini_ground.duplicate()
-	var tree_c: Color = {"autumn": Color("#a8522a"), "winter": Color("#7a8a92"), "steppe": Color("#5a5a2e")}.get(String(terrain.B.get("foliage", "")), Color("#245a2e"))
+	var tree_cs := {"autumn": Color("#a8522a"), "winter": Color("#7a8a92"), "steppe": Color("#5a5a2e"), "": Color("#245a2e")}
 	for id in sim.resources:
 		var r: Dictionary = sim.resources[id]
-		if r["kind"] == "tree":
-			img.set_pixelv(r["cell"], tree_c)
+		if r["kind"] == "tree":      # цвет кроны — по зоне, где растёт дерево
+			img.set_pixelv(r["cell"], tree_cs.get(String(_tree_fol.get(id, terrain.B.get("foliage", ""))), Color("#245a2e")))
 	_mini_tex.update(img)      # рудники рисуются значками поверх (см. _draw_mini)
 	_mini_dirty = false
 
@@ -1715,10 +1848,10 @@ func _draw_mini() -> void:
 	if _mini_dirty:
 		_bake_mini()
 	_mini.draw_texture_rect(_mini_tex, Rect2(Vector2.ZERO, Vector2(MINI_SIZE, MINI_SIZE)), false)
-	for id in sim.resources:      # рудники — значок-монета
+	for id in sim.resources:      # рудник — яркая золотая монета с тёмным ободком: ни с чем не спутать
 		var r: Dictionary = sim.resources[id]
 		if String(r["kind"]) == "gold":
-			_mini_icon((r["pos"] as Vector2) * k, "coin", Color("#ffc21a"), 13.0, Color(0.1, 0.08, 0.02))
+			_mini_mark((r["pos"] as Vector2) * k, "mine", Color("#ffcc1a"), Color(0.12, 0.08, 0.0))
 	for id in sim.buildings:
 		var b: Dictionary = sim.buildings[id]
 		if bviews.has(id) and not (bviews[id] as Node3D).visible:
@@ -1726,7 +1859,7 @@ func _draw_mini() -> void:
 		var icon: Array = MINI_ICONS.get(String(b["def"]["model"].get("shape", "")), []) if int(b["player"]) == Sim.NEUTRAL else []
 		if not icon.is_empty():      # нейтральные строения — значками
 			var own := int(b.get("owner", -1))
-			_mini_icon((b["pos"] as Vector2) * k, String(icon[0]), Color(String(icon[1])), 15.0, _mini_color(own) if own >= 0 else Color(0.08, 0.06, 0.04))
+			_mini_mark((b["pos"] as Vector2) * k, String(icon[0]), Color(String(icon[1])), _mini_color(own) if own >= 0 else Color(0.06, 0.05, 0.04, 0.85))
 			continue
 		var rect := Rect2(Vector2(b["cell"]) * k, Vector2(b["size"], b["size"]) * k)
 		_mini.draw_rect(rect.grow(1.0), Color.BLACK)
@@ -1762,17 +1895,70 @@ func _draw_mini() -> void:
 
 
 ## Значки нейтральных строений на мини-карте: модель здания -> [значок, цвет].
+## Значок у каждого вида — своя простая фигура, чтобы различать по форме, а не только по цвету:
+## рудник — золотой круг, шахта гоблинов — зелёный круг поменьше, лавка — квадрат,
+## наёмники — треугольник, источник — крест, башня — ромб, торговец — квадрат с точкой.
 const MINI_ICONS := {
-	"shop": ["potion", "#c98aff"], "goblin_mine": ["coin", "#7ad04a"], "merc_camp": ["axe", "#e8743a"],
-	"fountain": ["heal", "#6ad8b0"], "lookout": ["eye", "#9fe8ff"], "merchant": ["crown", "#ff9adf"],
+	"shop": ["square", "#c98aff"], "goblin_mine": ["gmine", "#7ad04a"], "merc_camp": ["triangle", "#ff7a3a"],
+	"fountain": ["cross", "#6ad8f0"], "lookout": ["diamond", "#e8f4ff"], "merchant": ["square_dot", "#ff9adf"],
 }
+const MINI_NAMES := {"mine": "Золотой рудник", "gmine": "Шахта гоблинов (захватывается)", "square": "Лавка торговца", "triangle": "Лагерь наёмников",
+	"cross": "Источник (лечит)", "diamond": "Сторожевая башня (захватывается)", "square_dot": "Бродячий торговец"}
 
 
-## Значок на мини-карте: квадратная иконка в рамке (рамка — цвет хозяина или тёмная).
-func _mini_icon(center: Vector2, kind: String, color: Color, size: float, frame: Color) -> void:
-	var r := Rect2(center - Vector2(size, size) * 0.5, Vector2(size, size))
-	_mini.draw_rect(r.grow(1.5), frame)
-	_mini.draw_texture_rect(Icons.make(kind, color), r, false)
+## Название значка мини-карты под мышью (пусто — если рядом ничего нет).
+func _mini_hint(at: Vector2) -> String:
+	var k := MINI_SIZE / sim.map_size
+	var best := ""
+	var best_d := 7.0
+	for id in sim.resources:
+		var r: Dictionary = sim.resources[id]
+		if String(r["kind"]) == "gold" and ((r["pos"] as Vector2) * k).distance_to(at) < best_d:
+			best_d = ((r["pos"] as Vector2) * k).distance_to(at)
+			best = "%s: %d золота" % [MINI_NAMES["mine"], int(r["amount"])]
+	for id in sim.buildings:
+		var b: Dictionary = sim.buildings[id]
+		if int(b["player"]) != Sim.NEUTRAL or (bviews.has(id) and not (bviews[id] as Node3D).visible):
+			continue
+		var icon: Array = MINI_ICONS.get(String(b["def"]["model"].get("shape", "")), [])
+		if icon.is_empty():
+			continue
+		var d: float = ((b["pos"] as Vector2) * k).distance_to(at)
+		if d < best_d:
+			best_d = d
+			best = String(MINI_NAMES.get(String(icon[0]), b["def"].get("name", "")))
+			var own := int(b.get("owner", -1))
+			if own >= 0:
+				best += " — %s" % ("ваша" if own == local_player else _player_name(own))
+	return best
+
+
+## Маленькая фигура на мини-карте (5–7 пикселей) с тёмной обводкой; frame — цвет хозяина или тёмный.
+func _mini_mark(c: Vector2, kind: String, color: Color, frame: Color) -> void:
+	match kind:
+		"mine":
+			_mini.draw_circle(c, 4.6, frame)
+			_mini.draw_circle(c, 3.4, color)
+			_mini.draw_circle(c + Vector2(-0.9, -0.9), 1.1, color.lightened(0.55))
+		"gmine":
+			_mini.draw_circle(c, 3.8, frame)
+			_mini.draw_circle(c, 2.6, color)
+		"square", "square_dot":
+			_mini.draw_rect(Rect2(c - Vector2(3, 3), Vector2(6, 6)), frame)
+			_mini.draw_rect(Rect2(c - Vector2(2, 2), Vector2(4, 4)), color)
+			if kind == "square_dot":
+				_mini.draw_rect(Rect2(c - Vector2(0.75, 0.75), Vector2(1.5, 1.5)), frame)
+		"triangle":
+			_mini.draw_colored_polygon(PackedVector2Array([c + Vector2(0, -4.6), c + Vector2(4.4, 3.4), c + Vector2(-4.4, 3.4)]), frame)
+			_mini.draw_colored_polygon(PackedVector2Array([c + Vector2(0, -2.8), c + Vector2(2.8, 2.2), c + Vector2(-2.8, 2.2)]), color)
+		"cross":
+			_mini.draw_rect(Rect2(c - Vector2(3.5, 1.5), Vector2(7, 3)), frame)
+			_mini.draw_rect(Rect2(c - Vector2(1.5, 3.5), Vector2(3, 7)), frame)
+			_mini.draw_rect(Rect2(c - Vector2(2.5, 0.75), Vector2(5, 1.5)), color)
+			_mini.draw_rect(Rect2(c - Vector2(0.75, 2.5), Vector2(1.5, 5)), color)
+		"diamond":
+			_mini.draw_colored_polygon(PackedVector2Array([c + Vector2(0, -4.2), c + Vector2(4.2, 0), c + Vector2(0, 4.2), c + Vector2(-4.2, 0)]), frame)
+			_mini.draw_colored_polygon(PackedVector2Array([c + Vector2(0, -2.5), c + Vector2(2.5, 0), c + Vector2(0, 2.5), c + Vector2(-2.5, 0)]), color)
 
 
 ## Поверх тумана: рамка обзора камеры и метки (тревога, сигналы союзников).
@@ -1791,23 +1977,43 @@ func _draw_mini_top() -> void:
 	pts.append(pts[0])
 	_mini_top.draw_polyline(pts, Color.WHITE, 1.5)
 	var live: Array = []
-	for ping in _mini_pings:      # метки тревоги
+	for ping in _mini_pings:      # метки на мини-карте
 		ping["t"] = float(ping["t"]) + get_process_delta_time()
-		if float(ping["t"]) < 4.0:
+		var t: float = float(ping["t"])
+		var p: Vector2 = (ping["pos"] as Vector2) * k
+		if ping.get("alert", false):      # тревога: быстрые красные вспышки и крест, не шире 11 пикселей
+			if t < 3.5:
+				live.append(ping)
+				var pulse := fmod(t * 2.5, 1.0)
+				var a := 1.0 if t < 2.8 else (3.5 - t) / 0.7
+				_mini_top.draw_arc(p, 3.0 + pulse * 8.0, 0.0, TAU, 16, Color(1.0, 0.2, 0.15, a * (1.0 - pulse)), 2.0)
+				_mini_top.draw_circle(p, 3.2, Color(1.0, 0.15, 0.1, a))
+				_mini_top.draw_line(p - Vector2(5, 5), p + Vector2(5, 5), Color(1, 1, 1, a * 0.9), 1.5)
+				_mini_top.draw_line(p - Vector2(5, -5), p + Vector2(5, -5), Color(1, 1, 1, a * 0.9), 1.5)
+		elif ping.get("quiet", false):      # новый лагерь нейтралов: одна тихая тонкая волна
+			if t < 1.6:
+				live.append(ping)
+				var c: Color = ping.get("color", Color("#e8b03a"))
+				_mini_top.draw_arc(p, 2.0 + t * 3.0, 0.0, TAU, 12, Color(c.r, c.g, c.b, 0.45 * (1.0 - t / 1.6)), 1.0)
+		elif t < 4.0:
 			live.append(ping)
-			_mini_top.draw_arc((ping["pos"] as Vector2) * k, 5.0 + fmod(float(ping["t"]) * 14.0, 12.0), 0.0, TAU, 20, ping.get("color", Color("#ff3a2a")), 2.0)
+			_mini_top.draw_arc(p, 5.0 + fmod(t * 14.0, 12.0), 0.0, TAU, 20, ping.get("color", Color("#ff3a2a")), 2.0)
 	_mini_pings = live
 
 
 func _mini_color(player: int) -> Color:
 	if player == Sim.NEUTRAL:
-		return Color("#e8b03a")
+		return Color("#b8704a")      # нейтралы — бурые (не жёлтые: жёлтый только у рудников)
 	return _team(player).lightened(0.25)
 
 
 ## ЛКМ по мини-карте переносит камеру, ПКМ отправляет туда выбранных юнитов.
 func _mini_input(event: InputEvent) -> void:
-	if _paused or sim == null:
+	if sim == null:
+		return
+	if event is InputEventMouseMotion:      # подсказка: что за значок под мышью
+		_mini.tooltip_text = _mini_hint(event.position)
+	if _paused:
 		return
 	var pos := Vector2(-1, -1)
 	var right := false
@@ -2028,7 +2234,7 @@ func _unit_def(player: int, key: String) -> Dictionary:
 	var data: Dictionary = sim.players[player]["data"]
 	if data["units"].has(key):
 		return data["units"][key]
-	return data.get("summons", {}).get(key, neutral["units"].get(key, {}))
+	return data.get("summons", {}).get(key, neutral["units"].get(key, neutral.get("mercs", {}).get(key, {})))
 
 
 func _icon(kind: String, player: int, key: String) -> Texture2D:
@@ -2095,6 +2301,8 @@ func _traits(def: Dictionary) -> Array:
 		var ac: Dictionary = def["autocast"]
 		if String(ac.get("kind", "heal")) == "summon":
 			out.append("В бою сам поднимает помощников: до %d сразу, раз в %d с" % [int(ac.get("max", 2)), int(ac.get("cooldown", 12))])
+		elif String(ac.get("kind", "heal")) == "buff":
+			out.append("Раз в %d с сам усиливает дерущегося союзника рядом на %d с: %s" % [int(ac.get("cooldown", 8)), int(ac.get("duration", 15)), _mods_text(ac.get("mods", {}))])
 		elif float(ac.get("mana", 0)) > 0.0:
 			out.append("Сама лечит раненых союзников: %d здоровья за %d маны, не чаще раза в %.1f с" % [int(ac["amount"]), int(ac["mana"]), float(ac["cooldown"])])
 		else:
@@ -2109,6 +2317,26 @@ func _traits(def: Dictionary) -> Array:
 	for k in [["crit_chance", "Шанс критического удара"], ["evasion", "Уклонение"], ["lifesteal", "Вампиризм"], ["thorns", "Шипы"]]:
 		if float(def.get(k[0], 0)) > 0.0:
 			out.append("%s: %d%%" % [k[1], roundi(float(def[k[0]]) * 100.0)])
+	if def.has("charge"):
+		out.append("Натиск: удар с разбега (бежал %.1f с) — урон ×%.1f и оглушение на %.1f с" % [float(def["charge"].get("after", 1.5)), float(def["charge"].get("mul", 1.8)), float(def["charge"].get("stun", 0.5))])
+	if def.has("bash"):
+		out.append("Оглушающий удар: шанс %d%% оглушить на %.1f с" % [roundi(float(def["bash"].get("chance", 0.2)) * 100.0), float(def["bash"].get("stun", 1.0))])
+	if def.has("poison"):
+		out.append("Яд: %d урона в секунду %d с" % [int(def["poison"].get("dps", 6)), int(def["poison"].get("duration", 4))])
+	if def.has("vs_large"):
+		out.append("Против крупных (всадники, великаны, машины): урон ×%.1f" % float(def["vs_large"]))
+	if def.has("kamikaze"):
+		out.append("Взрыв: %d урона всем врагам и зданиям в радиусе %.1f (сам погибает)" % [int(def["kamikaze"].get("damage", 100)), float(def["kamikaze"].get("radius", 2.0))])
+	if def.has("death_blast"):
+		out.append("Погибая, взрывается: %d урона врагам в радиусе %.1f" % [int(def["death_blast"].get("damage", 100)), float(def["death_blast"].get("radius", 2.0))])
+	if def.has("split"):
+		out.append("Погибая, распадается на %d детёнышей" % int(def["split"].get("count", 2)))
+	if float(def.get("hp_regen", 0)) > 0.0 and not def.get("hero", false):
+		out.append("Восстанавливает %.1f здоровья в секунду" % float(def["hp_regen"]))
+	if (def.get("lacks", []) as Array).has("entrench"):
+		out.append("Не окапывается")
+	if int(def.get("tier", 1)) >= 2:
+		out.append("Нужен %d уровень главного здания" % int(def["tier"]))
 	return out
 
 
@@ -2123,6 +2351,10 @@ func _building_tip(def: Dictionary) -> String:
 		for k in def["trains"]:
 			names.append(String(sim.players[local_player]["data"]["units"][k]["name"]).to_lower())
 		text += "\nНанимает: " + ", ".join(names)
+	if def.has("description"):
+		text += "\n" + String(def["description"])
+	if int(def.get("tier", 1)) > sim.tier(local_player):
+		text = "ЗАКРЫТО: нужен %d уровень главного здания\n" % int(def["tier"]) + text
 	return text
 
 
@@ -2280,6 +2512,8 @@ func _update_stats() -> void:
 			fx.append({"key": "hidden", "icon": "moon", "color": "#6a5aff", "ratio": 0.0, "tip": "Укрылся в ночи: враги его не видят, пока он стоит и не дерётся"})
 		elif sim.has_trait(u, "shadowmeld") and sim.is_night():
 			fx.append({"key": "meld", "icon": "moon", "color": "#3a3a6a", "ratio": 0.0, "tip": "Ночь: постойте на месте 2 с без боя — и враги перестанут его видеть"})
+		if u.get("high", false):
+			fx.append({"key": "high", "icon": "eye", "color": "#c9a23a", "ratio": 0.0, "tip": "На возвышенности: обзор +%.1f%s" % [Sim.HIGH_SIGHT, (", дальность атаки +%d" % int(Sim.HIGH_RANGE)) if float(u["base"]["range"]) > 2.0 else ""]})
 		if sim.swims(u) and sim.in_water(u["pos"]):
 			fx.append({"key": "swim", "icon": "regen", "color": "#3aa8d0", "ratio": 0.0, "tip": "Плывёт: в воде восстанавливает %d здоровья в секунду" % int(Sim.WATER_REGEN)})
 		if u["def"].get("undead", false):
@@ -2308,21 +2542,35 @@ func _update_stats() -> void:
 		match String(d.get("role", "")):      # нейтральные строения: что они дают и чьи они
 			"capture":
 				var owner := int(b.get("owner", -1))
+				var mine := int(d.get("income", 40)) > 0      # шахта гоблинов или сторожевая башня
+				var thing := "шахту" if mine else "башню"
 				var who := "ничья" if owner < 0 else ("ваша" if owner == local_player else "противника")
-				_stat_extra.text = "Шахта %s. +%d золота в минуту хозяину" % [who, int(d.get("income", 40))]
-				if owner == local_player:
-					_stat_extra.text += "  ·  следующий доход через %d с" % ceili((int(b.get("next_income", 0)) - sim.tick) * Sim.TICK_DT)
+				if mine:
+					_stat_extra.text = "Шахта %s. +%d золота в минуту хозяину" % [who, int(d.get("income", 40))]
+					if owner == local_player:
+						_stat_extra.text += "  ·  следующий доход через %d с" % ceili((int(b.get("next_income", 0)) - sim.tick) * Sim.TICK_DT)
+				else:
+					_stat_extra.text = "Башня %s. Команда хозяина видит всё вокруг неё" % who
 				if float(b.get("cap", 0.0)) > 0.0:
 					_stat_extra.text += "\nЗахват: %d%%" % int(float(b["cap"]) / float(d.get("capture_time", 6)) * 100.0)
 				elif b.get("guarded", false):
-					_stat_extra.text += "\nСначала разбейте нейтралов, охраняющих шахту"
+					_stat_extra.text += "\nСначала разбейте нейтралов, охраняющих %s" % thing
 				elif owner != local_player:
-					_stat_extra.text += "\nПриведите войска к шахте, пока рядом нет врагов"
+					_stat_extra.text += "\nПриведите войска к %s, пока рядом нет врагов" % ("шахте" if mine else "башне")
 			"fountain":
 				_stat_extra.text = _wrap(String(d.get("description", "")), 60)
 			"mercenary":
-				var cd := ceili((int(b.get("hire_cd", 0)) - sim.tick) * Sim.TICK_DT)
-				_stat_extra.text = "Наёмники отдыхают: %d с" % cd if cd > 0 else "Наёмники готовы. Нужен ваш юнит рядом"
+				var th: Dictionary = sim.merc_theme(b)
+				_stat_name.text = String(th.get("name", d["name"]))
+				_stat_extra.text = String(th.get("about", ""))
+				var soon := -1
+				for rk in b.get("restock_at", {}):
+					var left_s := ceili((int(b["restock_at"][rk]) - sim.tick) * Sim.TICK_DT)
+					soon = left_s if soon < 0 else mini(soon, left_s)
+				if soon >= 0:
+					_stat_extra.text += "\nПополнение через %d с" % soon
+				if b.get("captain", false):
+					_stat_extra.text += "\nЗдесь ждёт легендарный Капитан наёмников!"
 			"shop":
 				_stat_extra.text = "Подведите героя и купите предмет"
 		if not b["done"]:
@@ -2418,6 +2666,12 @@ func _mods_text(mods: Dictionary) -> String:
 				parts.append("шипы %d%%" % roundi(v * 100.0))
 			"damage_taken_mul":
 				parts.append("неуязвимость" if v <= 0.01 else "получаемый урон %+d%%" % roundi((v - 1.0) * 100.0))
+			"range_add":
+				parts.append("дальность %+.2f" % v)
+			"hp_add":
+				parts.append("%+d к здоровью" % roundi(v))
+			"carry_add":
+				parts.append("%+d золота за ходку" % roundi(v))
 	return ", ".join(parts)
 
 
@@ -2620,11 +2874,11 @@ func _refresh_card() -> void:
 	elif sel_building >= 0 and sim.buildings.has(sel_building) and String(sim.buildings[sel_building]["def"].get("role", "")) == "shop":
 		key = "shop:%d" % sel_building
 	elif sel_building >= 0 and sim.buildings.has(sel_building) and String(sim.buildings[sel_building]["def"].get("role", "")) == "mercenary":
-		key = "merc:%d" % sel_building
+		key = "merc:%d:%s:%s" % [sel_building, str(sim.buildings[sel_building].get("stock", {})), str(sim.buildings[sel_building].get("restock_at", {}).keys())]      # запас поменялся — кнопки обновятся
 	elif sel_building >= 0 and sim.buildings.has(sel_building) and int(sim.buildings[sel_building]["player"]) == local_player:
-		key = "building:%d:%s:%s:%s:%s" % [sel_building, str(sim.players[local_player]["heroes"]), str(sim.players[local_player]["upgrades"]), str(sim.players[local_player]["research_wip"]), str(sim.buildings[sel_building]["done"])]
+		key = "building:%d:%s:%s:%s:%s:%s" % [sel_building, str(sim.players[local_player]["heroes"]), str(sim.players[local_player]["upgrades"]), str(sim.players[local_player]["research_wip"]), str(sim.buildings[sel_building]["done"]), str(sim.tier3_missing(local_player))]
 	elif not _selected_workers().is_empty():
-		key = "workers"
+		key = "workers:%d" % sim.tier(local_player)      # новый уровень главного здания открывает новые постройки
 	if key == _card_key:
 		return
 	_card_key = key
@@ -2666,20 +2920,33 @@ func _refresh_card() -> void:
 			var tip := "%s\n%d золота%s\n%s\nПокупает ваш герой, стоящий рядом с лавкой (сумка — %d ячеек)." % [it["name"], int(it["cost"]["gold"]), "   ·   расходуется" if it.has("use") else "", it["description"], Sim.MAX_ITEMS]
 			_add_card_button(Icons.make(String(it["icon"]), Color(String(it["color"]))), "", tip, _buy.bind(String(ikey)), 60, it["cost"])
 	elif key.begins_with("merc:"):
-		var hires: Dictionary = sim.buildings[sel_building]["def"]["hires"]
-		for ukey in hires:
-			var def: Dictionary = neutral["units"][ukey]
-			var offer: Dictionary = hires[ukey]
-			var tip := "Нанять: %s   ·   %d золота, лимит %d\n" % [def["name"], int(offer["gold"]), int(offer.get("supply", 2))]
-			tip += "Здоровье %d   Урон %d (%s)   Броня %d\n" % [int(def["hp"]), int(def["damage"]), DAMAGE_NAMES.get(def["damage_type"], ""), int(def["armor"])]
+		var camp: Dictionary = sim.buildings[sel_building]
+		var offers: Dictionary = sim.merc_offers(camp)
+		var keys: Array = offers.keys()
+		keys.sort()
+		for ukey in keys:
+			var def: Dictionary = sim.merc_def(String(ukey))
+			if def.is_empty():
+				continue
+			var offer: Dictionary = offers[ukey]
+			var left := int(camp.get("stock", {}).get(ukey, 0))
+			var tip := "%s   ·   %s, лимит %d\n" % [def["name"], _cost_text(offer), int(def.get("supply", 2))]
+			tip += String(def.get("description", "")) + "\n"
+			tip += "Здоровье %d   Урон %d (%s)   Броня %d   Дальность %s\n" % [int(def["hp"]), int(def["damage"]), DAMAGE_NAMES.get(def["damage_type"], ""), int(def["armor"]), _range_text(float(def["range"]))]
 			for line in _traits(def):
 				tip += "• %s\n" % line
-			tip += "Нужен любой ваш юнит рядом с лагерем. После найма лагерь отдыхает %d с." % int(sim.buildings[sel_building]["def"].get("hire_cooldown", 20))
-			_add_card_button(_icon("unit", local_player, String(ukey)), "", tip, _hire.bind(String(ukey)), 72, offer)
-	elif key == "workers":
+			tip += "В лагере: %d из %d%s\n" % [left, int(offer.get("stock", 1)), (" · пополнение раз в %d с" % int(offer.get("restock", 0))) if float(offer.get("restock", 0)) > 0.0 else " · больше не появится"]
+			tip += "Нужен любой ваш юнит рядом. Нанятый сам пойдёт за тем, кто его нанял."
+			var item := _add_card_button(_icon("unit", local_player, String(ukey)), "", tip, _hire.bind(String(ukey)), 72, offer)
+			(item["cd"] as Label).text = "×%d" % left if left > 0 else ""
+			if left <= 0:
+				(item["button"] as Button).modulate = Color(0.45, 0.45, 0.45)
+	elif key.begins_with("workers"):
 		for bkey in data["buildings"]:
 			var def: Dictionary = data["buildings"][bkey]
-			_add_card_button(_icon("building", local_player, String(bkey)), String(def.get("hotkey", "")), _building_tip(def), _begin_place.bind(String(bkey)), 72, def.get("cost", {}))
+			var bitem := _add_card_button(_icon("building", local_player, String(bkey)), String(def.get("hotkey", "")), _building_tip(def), _begin_place.bind(String(bkey)), 72, def.get("cost", {}))
+			if int(def.get("tier", 1)) > sim.tier(local_player):
+				(bitem["button"] as Button).modulate = Color(0.45, 0.45, 0.45)
 	elif key != "":
 		var cur: Dictionary = sim.buildings[sel_building]
 		for ukey in (cur["def"].get("trains", []) if cur["done"] else []):
@@ -2689,7 +2956,7 @@ func _refresh_card() -> void:
 			if int(def.get("tier", 1)) > my_tier:
 				lock = "ЗАКРЫТО: нужно улучшить главное здание (%s)\n" % String(data["buildings"]["hall"]["name"]).to_lower()
 			elif def.get("hero", false) and not sim.players[local_player]["heroes"].has(ukey) and (sim.players[local_player]["heroes"] as Dictionary).size() >= my_tier:
-				lock = "ЗАКРЫТО: для второго героя улучшите главное здание (%s)\n" % String(data["buildings"]["hall"]["name"]).to_lower()
+				lock = "ЗАКРЫТО: для %s героя улучшите главное здание (%s)\n" % ["второго" if my_tier == 1 else "третьего", String(data["buildings"]["hall"]["name"]).to_lower()]
 			var ucost: Dictionary = def.get("cost", {})
 			var hstate = sim.players[local_player]["heroes"].get(ukey)
 			if def.get("hero", false) and hstate != null and String(hstate["state"]) == "dead":
@@ -2701,6 +2968,15 @@ func _refresh_card() -> void:
 			var up: Dictionary = data["upgrades"][rkey]
 			var lvl: int = int(sim.players[local_player]["upgrades"].get(rkey, 0))
 			var tip := "%s   ·   уровень %d из %d   [%s]\n" % [up["name"], lvl, int(up["max"]), up.get("hotkey", "")]
+			var locked := ""
+			if int(up.get("tier", 1)) > sim.tier(local_player):
+				locked = "ЗАКРЫТО: нужен %d уровень главного здания\n" % int(up["tier"])
+			elif String(rkey) == "tier" and lvl == 1 and not sim.tier3_missing(local_player).is_empty():
+				var miss: Array = []
+				for mk in sim.tier3_missing(local_player):
+					miss.append(String(data["buildings"][mk]["name"]))
+				locked = "ЗАКРЫТО: для 3 уровня постройте: %s\n" % ", ".join(miss)
+			tip = locked + tip
 			if lvl >= int(up["max"]):
 				tip += "Изучено полностью\n"
 			elif sim.players[local_player]["research_wip"].has(rkey):
@@ -2708,9 +2984,17 @@ func _refresh_card() -> void:
 			else:
 				tip += "Следующий уровень: %s\n" % _cost_text(sim.upgrade_cost(local_player, String(rkey)))
 			tip += String(up["description"])
+			if up.has("units"):
+				var who: Array = []
+				for uk in up["units"]:
+					if data["units"].has(uk):
+						who.append(String(data["units"][uk]["name"]).to_lower())
+				tip += "\nДействует на: " + ", ".join(who)
 			var item := _add_card_button(Icons.make(String(up["icon"]), Color(String(up["color"]))), String(up.get("hotkey", "")), tip, _research.bind(String(rkey)), 72, {} if lvl >= int(up["max"]) else sim.upgrade_cost(local_player, String(rkey)))
 			(item["cd"] as Label).text = str(lvl) if lvl > 0 else ""
 			(item["button"] as Button).disabled = lvl >= int(up["max"])
+			if locked != "":
+				(item["button"] as Button).modulate = Color(0.45, 0.45, 0.45)
 		for act in (cur["def"].get("actions", []) if cur["done"] else []):      # особые действия здания
 			var atip := "%s   [%s]\n%s\nПерезарядка %d с" % [act["name"], act.get("hotkey", ""), act["description"], int(act.get("cooldown", 60))]
 			_add_card_button(Icons.make(String(act["icon"]), Color(String(act["color"]))), String(act.get("hotkey", "")), atip, _building_action.bind(String(act["key"])))
@@ -2933,42 +3217,76 @@ func _process(delta: float) -> void:
 				_acc = minf(_acc, Sim.TICK_DT)      # ждём команды второго игрока
 				break
 			_acc -= Sim.TICK_DT
+			var p0 := Time.get_ticks_usec()
 			sim.step()
+			p0 = _pt("sim.step", p0)
 			_consume_events()
+			p0 = _pt("events", p0)
 			for ai in ais:      # каждый компьютер думает раз в секунду, но в свой тик — без общих рывков
 				if (sim.tick + int(ai.me) * 3) % 10 == 0:
 					ai.think()
+			p0 = _pt("ai", p0)
 			for wid in views:
 				var wu: Dictionary = sim.units[wid] if sim.units.has(wid) else {}
 				if not wu.is_empty() and wu["busy"] and float(wu["swing"]) < 0.0 and sim.is_worker(wu) and (sim.tick + int(wid) * 3) % 8 == 0:
 					_sfx("chop", wu["pos"], -10.0)
 					var tid = wu["order"].get("target", -1)
-					if String(wu["order"].get("type")) == "gather" and String(wu["order"].get("kind")) == "tree" and rviews.has(tid):
-						var tree: Node3D = rviews[tid]      # дерево вздрагивает от удара
+					if String(wu["order"].get("type")) == "gather" and String(wu["order"].get("kind")) == "tree" and (rviews.has(tid) or _tree_slot.has(tid)):
+						var tree: Node3D = _res_node(int(tid))      # дерево вздрагивает от удара
 						var tw := create_tween()
 						tw.tween_property(tree, "rotation:z", 0.07, 0.06)
 						tw.tween_property(tree, "rotation:z", 0.0, 0.25).set_trans(Tween.TRANS_ELASTIC).set_ease(Tween.EASE_OUT)
+		var p1 := Time.get_ticks_usec()
 		_update_camera(delta)
 		fog.update(sim, local_player, delta)
+		p1 = _pt("fog", p1)
 		_update_views(delta)
+		p1 = _pt("views", p1)
 		_update_projectiles()
 		_update_ghost()
 		_update_hud(delta)
+		p1 = _pt("hud", p1)
 		_update_presentation()
+		p1 = _pt("presentation", p1)
 		_bars.queue_redraw()
 		_mini_redraw -= delta
 		if _mini_redraw <= 0.0:      # мини-карта обновляется 15 раз в секунду, а не каждый кадр
 			_mini_redraw = 1.0 / 15.0
 			_mini.queue_redraw()
+		if not _prewarm.is_empty():
+			_prewarm_step()
 	if not _test.is_empty():
 		_run_test()
+
+
+## Замер времени частей кадра (только с ключом --prof): секция -> [сумма мкс, худший мкс].
+var prof: Dictionary = {}
+
+
+func _pt(key: String, since: int) -> int:
+	var now := Time.get_ticks_usec()
+	if _test.has("prof"):
+		var rec: Array = prof.get(key, [0, 0])
+		rec[0] = int(rec[0]) + now - since
+		rec[1] = maxi(int(rec[1]), now - since)
+		prof[key] = rec
+	return now
 
 
 ## Симуляция сообщает, что изменилось; здесь под это подстраивается картинка.
 func _consume_events() -> void:
 	var batch: Array = sim.events.duplicate()
 	sim.events.clear()       # очередь очищается сразу: сбой в одном событии не должен повторяться вечно
+	var profiling := _test.has("prof")
 	for e in batch:
+		var pe := Time.get_ticks_usec() if profiling else 0
+		_consume_event(e)
+		if profiling:
+			_pt("ev:" + String(e["type"]), pe)
+
+
+func _consume_event(e: Dictionary) -> void:
+	if true:
 		match String(e["type"]):
 			"unit_added":
 				if sim.units.has(e["id"]):
@@ -3000,12 +3318,21 @@ func _consume_events() -> void:
 				if fog.visible_at(e["pos"]):
 					_pillar(e["pos"], Color("#6aff8a"))
 					_sfx("spell", e["pos"], -4.0)
-			"feast":
-				if views.has(e["id"]) and sim.units.has(e["id"]):
-					_ring_fx(sim.units[e["id"]]["pos"], 1.3, Color("#ff3a1a"))
+			"feast":      # огр добил врага: только всплывающее «+здоровье», без кругов
+				pass
 			"corpse_removed":
-				if String(e["how"]) == "eaten" and fog.visible_at(e["pos"]):
-					_ring_fx(e["pos"], 0.8, Color("#8a2a2a"))
+				pass
+			"explosion":      # подрывник, поганище: вспышка и грохот
+				if fog.visible_at(e["pos"]):
+					_pillar(e["pos"], Color(String(e["color"])))
+					_sfx("crash", e["pos"], 2.0)
+			"charge":      # натиск с разбега
+				if fog.visible_at(e["pos"]):
+					_spark(int(e["id"]))
+					_sfx("crash", e["pos"], -6.0)
+			"flee":      # рабочий убегает от удара (тревогу уже подняло попадание)
+				if views.has(e["id"]) and fog.visible_at(e["pos"]):
+					floaters.append({"pos": _at(e["pos"], 1.4), "text": "!", "t": 0.0, "color": Color("#ffd24a")})
 			"repair_spark":
 				if fog.visible_at(e["pos"]) and sim.buildings.has(e["id"]):
 					_spark(int(e["id"]))
@@ -3025,6 +3352,8 @@ func _consume_events() -> void:
 					sel_building = -1
 			"resource_removed":
 				_mini_dirty = true
+				if _tree_slot.has(e["id"]):      # дерево в пачке: просто убираем его оттуда
+					_res_node(int(e["id"]))
 				if rviews.has(e["id"]):
 					_fell(rviews[e["id"]])
 					rviews.erase(e["id"])
@@ -3079,6 +3408,13 @@ func _consume_events() -> void:
 			"building_done":
 				if sim.buildings.has(e["id"]) and int(sim.buildings[e["id"]]["player"]) == local_player:
 					audio.play("done", -6.0)
+			"unit_removed":      # юнит убран без смерти (наёмник встал от костра и ушёл служить)
+				if views.has(e["id"]):
+					(views[e["id"]]["node"] as Node3D).queue_free()
+					views.erase(e["id"])
+				selected.erase(e["id"])
+				if inspect == int(e["id"]):
+					inspect = -1
 			"bought":
 				if int(e["player"]) == local_player:
 					audio.play("gold", -4.0)
@@ -3110,7 +3446,7 @@ func _consume_events() -> void:
 				if ht != null:
 					_sfx("hit", ht["pos"], -12.0)
 					if int(ht["player"]) == local_player:
-						_alert(ht["pos"])
+						_alert(ht["pos"], "base" if ht["is_building"] else ("workers" if sim.is_worker(ht) else "army"))
 			"death":
 				_deaths += 1
 				if views.has(e["id"]):
@@ -3177,7 +3513,7 @@ func _consume_events() -> void:
 				elif sim.allies(int(e["player"]), local_player):
 					_feed_line("%s берёт: %s" % [_player_name(int(e["player"])), String(Sim.RUNE_INFO[e["kind"]]["name"]).to_lower()], Color(String(Sim.RUNE_INFO[e["kind"]]["color"])))
 			"camp_spawned":      # новый лагерь нейтралов: метка на мини-карте
-				_mini_pings.append({"pos": e["pos"], "t": 0.0, "color": Color("#e8b03a")})
+				_mini_pings.append({"pos": e["pos"], "t": 0.0, "color": Color("#e8b03a"), "quiet": true})
 			"boss_slain":
 				_ring_fx(e["pos"], 6.0, Color("#ff5a1a"))
 				audio.play("victory" if int(e["player"]) == local_player else "horn", -4.0)
@@ -3192,14 +3528,74 @@ func _sfx(sound: String, pos: Vector2, gain: float = 0.0) -> void:
 		audio.play(sound, gain - d * 0.55 - (_zoom - 19.0) * 0.25)
 
 
-## Тревога, если бьют наших там, куда игрок сейчас не смотрит.
-func _alert(pos: Vector2) -> void:
-	if _time - _alert_time < 12.0 or pos.distance_to(Vector2(_rig.position.x, _rig.position.z)) < 16.0:
+const ALERT_TEXT := {
+	"base": ["БАЗА ПОД УДАРОМ!", "Враг атакует ваши здания"],
+	"workers": ["РАБОЧИЕ ПОД УДАРОМ!", "Рабочие разбегаются — пошлите им на помощь войска"],
+	"army": ["НАС АТАКУЮТ!", "Ваши войска вступили в бой"],
+}
+var _alert_pos := Vector2(-1, -1)
+var _alert_spots: Array = []      # где недавно била тревога: {pos, t} — чтобы не повторять её каждый удар
+var _alert_box: Control
+
+
+## Тревога, если бьют наших там, куда игрок сейчас не смотрит: крупная красная надпись,
+## рог и быстро пульсирующая метка на мини-карте. Пробел — камера к месту боя.
+func _alert(pos: Vector2, kind := "army") -> void:
+	if pos.distance_to(Vector2(_rig.position.x, _rig.position.z)) < 16.0:
 		return
+	var fresh: Array = []
+	var known := false
+	for a in _alert_spots:
+		if _time - float(a["t"]) < 10.0:
+			fresh.append(a)
+			if (a["pos"] as Vector2).distance_to(pos) < 14.0:
+				known = true
+	_alert_spots = fresh
+	if known:
+		return
+	_alert_spots.append({"pos": pos, "t": _time})
+	_alert_pos = pos
+	_mini_pings.append({"pos": pos, "t": 0.0, "alert": true})
+	if _time - _alert_time < 6.0:
+		return      # надпись и рог — не чаще раза в 6 секунд, метки — для каждого нового места
 	_alert_time = _time
-	_say("Нас атакуют!")
-	audio.play("horn", -4.0)
-	_mini_pings.append({"pos": pos, "t": 0.0})
+	audio.play("horn", -3.0)
+	var t: Array = ALERT_TEXT.get(kind, ALERT_TEXT["army"])
+	_feed_line("Тревога! %s (Пробел — к месту боя)" % t[1], Color("#ff5a4a"))
+	if _alert_box != null and is_instance_valid(_alert_box):
+		_alert_box.queue_free()
+	var box := VBoxContainer.new()
+	box.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	box.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	box.position.y = 96
+	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.alignment = BoxContainer.ALIGNMENT_CENTER
+	var title := Label.new()
+	title.text = String(t[0])
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_color_override("font_color", Color("#ff4a3a"))
+	_outlined(title, 38)
+	title.add_theme_constant_override("outline_size", 10)
+	box.add_child(title)
+	var sub := Label.new()
+	sub.text = "%s   ·   Пробел — к месту боя" % t[1]
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	sub.add_theme_color_override("font_color", Color("#ffd0c0"))
+	_outlined(sub, 18)
+	box.add_child(sub)
+	_ui.add_child(box)
+	_alert_box = box
+	box.position.y = 60
+	box.modulate.a = 0.0
+	var tw := create_tween()
+	tw.tween_property(box, "position:y", 96.0, 0.25).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.parallel().tween_property(box, "modulate:a", 1.0, 0.15)
+	for i in 3:      # три коротких вспышки
+		tw.tween_property(title, "modulate", Color(1.6, 1.6, 1.6), 0.12)
+		tw.tween_property(title, "modulate", Color.WHITE, 0.18)
+	tw.tween_interval(2.2)
+	tw.tween_property(box, "modulate:a", 0.0, 0.6)
+	tw.tween_callback(box.queue_free)
 
 
 func _say(text: String) -> void:
@@ -3248,6 +3644,7 @@ const WORLD_EVENT_TEXT := {
 	"merchant": ["Бродячий торговец", "Продаёт редкие артефакты — но уедет через 2,5 минуты.", "#c98aff"],
 	"gold_rush": ["Золотая лихорадка", "90 секунд рабочие приносят в полтора раза больше золота.", "#ffd24a"],
 	"blood_moon": ["Кровавая луна", "Этой ночью нейтралы злее (+30% урона), а награда за них в полтора раза больше.", "#ff3a3a"],
+	"captain": ["Легендарный наёмник", "В одном из лагерей наёмников ждёт Капитан наёмников — всадник с аурой. Он такой один на всю карту!", "#ffb03a"],
 	"storm": ["Гроза", "90 секунд бьют молнии, а видно хуже. Берегите войска на открытых местах.", "#9ab8ff"],
 }
 
@@ -3399,6 +3796,56 @@ func _shadowmeld_look(v: Dictionary, u: Dictionary) -> void:
 		(mi as GeometryInstance3D).transparency = 0.6 if ghost else 0.0
 
 
+var _corpse_meshes: Dictionary = {}      # вид модели -> склеенное лежащее тело
+
+
+## Улёгшееся тело (лежит 45 с: его едят гули и поднимают некроманты) склеивается в одну сетку
+## без тени: вместо десятка подвижных частей — один вызов отрисовки. Поза у всех тел одного
+## вида одинаковая, поэтому сетка считается один раз на вид.
+func _flatten_corpse(c: Dictionary) -> void:
+	var node: Node3D = c["node"]
+	var parts: Dictionary = c["parts"]
+	var body = parts.get("body")
+	if not (body is Node3D) or not node.has_meta("mkey"):
+		c["flat"] = null
+		return
+	var key := "%s|%s" % [String(node.get_meta("mkey")), String(parts.get("kind", ""))]
+	if not _corpse_meshes.has(key):
+		for k in ["torso", "head", "arm_l", "arm_r"]:      # руки, ноги, голова — в покой, чтобы поза была одна на всех
+			if parts.get(k) is Node3D:
+				(parts[k] as Node3D).rotation = Vector3.ZERO
+		for leg in parts.get("legs", []):
+			(leg as Node3D).rotation = Vector3.ZERO
+		(body as Node3D).position.x = 0.0
+		(body as Node3D).position.z = 0.0
+		_corpse_meshes[key] = Models.flatten(node, body)
+	var mi := MeshInstance3D.new()
+	mi.mesh = _corpse_meshes[key]
+	mi.material_override = node.get_meta("umat", Models.vc_material())
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	node.add_child(mi)
+	(body as Node3D).visible = false
+	c["flat"] = mi
+
+
+## Модель ресурса как отдельный узел. Дерево из пачки при этом «вынимается»: в пачке его
+## место пустеет, а взамен ставится обычная модель — её можно качать, валить и подсвечивать.
+func _res_node(id: int) -> Node3D:
+	if rviews.has(id):
+		return rviews[id]
+	if not _tree_slot.has(id):
+		return null
+	var slot: Array = _tree_slot[id]
+	_tree_slot.erase(id)
+	var xf: Transform3D = slot[2]
+	(slot[0] as MultiMesh).set_instance_transform(int(slot[1]), Transform3D(Basis.from_scale(Vector3.ONE * 0.0001), xf.origin - Vector3(0, 60, 0)))
+	var node := Models.tree(int(slot[3]), slot[4])
+	node.transform = xf
+	add_child(node)
+	rviews[id] = node
+	return node
+
+
 func _collapse(node: Node3D) -> void:
 	var tw := create_tween()
 	tw.tween_property(node, "scale", Vector3(1.05, 0.05, 1.05), 0.6)
@@ -3521,12 +3968,17 @@ func _update_views(delta: float) -> void:
 				node.scale = Vector3.ONE
 				v.erase("pop")
 		Anim.animate(v, moving, float(u["speed"]), working, 0.0 if stunned else delta, _time)
-		(v["ring"] as Node3D).visible = selected.has(id) or id == inspect
-		((v["ring"] as MeshInstance3D).material_override as StandardMaterial3D).albedo_color = Color("#3cff5a") if int(u["player"]) == local_player else Color("#ff5a4a")
+		var ring_on: bool = id == inspect or selected.has(id)
+		if (v["ring"] as Node3D).visible != ring_on:
+			(v["ring"] as Node3D).visible = ring_on
+			if ring_on:      # цвет кольца меняем только когда оно появляется (смена материала — дорогая операция)
+				((v["ring"] as MeshInstance3D).material_override as StandardMaterial3D).albedo_color = Color("#3cff5a") if int(u["player"]) == local_player else Color("#ff5a4a")
 		var fx: MeshInstance3D = v["fx"]
 		var buffs: Array = u["buffs"]
-		fx.visible = stunned or not buffs.is_empty()
-		if fx.visible:
+		var fx_on: bool = stunned or not buffs.is_empty()
+		if fx.visible != fx_on:
+			fx.visible = fx_on
+		if fx_on:
 			var slowed := false
 			var raging := false
 			for b in buffs:
@@ -3534,7 +3986,10 @@ func _update_views(delta: float) -> void:
 					slowed = true
 				if String(b["key"]) == "rage":
 					raging = true
-			(fx.material_override as StandardMaterial3D).albedo_color = Color("#fff06a") if stunned else (Color("#7fd6ff") if slowed else (Color("#ff2a10") if raging else Color("#ff9a3a")))
+			var fxc: Color = Color("#fff06a") if stunned else (Color("#7fd6ff") if slowed else (Color("#ff2a10") if raging else Color("#ff9a3a")))
+			var fxm := fx.material_override as StandardMaterial3D
+			if fxm.albedo_color != fxc:
+				fxm.albedo_color = fxc
 			fx.rotation.y = _time * (3.0 + 2.0 * int(u.get("rage", 0)) * int(raging))
 			if raging:      # ярость огра: кольцо пульсирует тем сильнее, чем больше ступеней
 				var pulse := 1.0 + 0.06 * int(u.get("rage", 1)) * (0.5 + 0.5 * sin(_time * 12.0))
@@ -3559,17 +4014,29 @@ func _update_views(delta: float) -> void:
 		gem.rotation.y = _time * 1.6
 		gem.position.y = 0.9 + sin(_time * 2.2 + float(id)) * 0.12
 	_update_daylight()
-	for id in bviews:
+	_bframe += 1
+	for id in bviews:      # здания меняются медленно: каждое проверяем раз в 4 кадра (по очереди)
 		var b: Dictionary = sim.buildings[id]
+		if (int(id) + _bframe) % 4 != 0 and b["done"]:      # стройки — каждый кадр (они растут)
+			continue
 		var bseen := _building_seen(b)
-		if (bviews[id] as Node3D).visible != bseen:
-			(bviews[id] as Node3D).visible = bseen
-		var grown: float = 1.15 if String(b["def"].get("role", "")) == "hall" and sim.tier(int(b["player"])) > 1 else 1.0
-		(bviews[id] as Node3D).scale = Vector3(grown, grown * (1.0 if b["done"] else lerpf(0.12, 1.0, float(b["progress"]))), grown)
+		var bn: Node3D = bviews[id]
+		if bn.visible != bseen:
+			bn.visible = bseen
+		var grown: float = 1.0 + 0.12 * (sim.tier(int(b["player"])) - 1) if String(b["def"].get("role", "")) == "hall" else 1.0      # главное здание растёт с каждым уровнем
+		var want := Vector3(grown, grown * (1.0 if b["done"] else lerpf(0.12, 1.0, float(b["progress"]))), grown)
+		if bn.scale != want:
+			bn.scale = want
 	var keep: Array = []
+	var flattened := 0      # не больше одного нового тела за кадр: при массовой гибели нагрузка растягивается
 	for c in corpses:
 		if c.get("keep", false) and not sim.corpses.has(c.get("id", -1)):
 			c["keep"] = false      # тело съели, подняли или оно истлело — уходит в землю
+		if c.get("keep", false) and float(c["t"]) >= 2.0 and not c.has("flat") and flattened == 0:
+			var pf := Time.get_ticks_usec()
+			_flatten_corpse(c)
+			_pt("flatten", pf)
+			flattened += 1
 		if Anim.die(c, delta):
 			(c["node"] as Node3D).queue_free()
 		else:
@@ -3622,8 +4089,8 @@ func _update_projectiles() -> void:
 		var total: float = maxf(0.1, (p["start"] as Vector2).distance_to(p["tpos"]))
 		var k: float = clampf((p["start"] as Vector2).distance_to(pos) / total, 0.0, 1.0)
 		var arc: float = (2.0 if p["kind"] == "rock" else 0.5) * minf(1.0, total / 6.0)
-		var from_y: float = terrain.height(p["start"]) + float(p["height"])
-		var to_y: float = terrain.height(p["tpos"]) + 0.8
+		var from_y: float = terrain.h_at(p["start"]) + float(p["height"])
+		var to_y: float = terrain.h_at(p["tpos"]) + 0.8
 		var here := Vector3(pos.x, lerpf(from_y, to_y, k) + sin(k * PI) * arc, pos.y)
 		var node: Node3D = pviews[id]
 		node.visible = fog.visible_at(pos)
@@ -3919,13 +4386,19 @@ func _update_ghost() -> void:
 		ok = false      # слишком близко к руднику
 		_hint.text = "Главное здание нельзя ставить вплотную к руднику — отступите на %d клетки" % Sim.HALL_MINE_GAP
 	var center := Vector2(_ghost_cell) + Vector2(s, s) * 0.5
+	if int(def.get("tier", 1)) > sim.tier(local_player):
+		ok = false
+		_hint.text = "Сначала улучшите главное здание до %d уровня" % int(def["tier"])
+	var warn := sim.guarded_spot(center, Sim.GUARD_BUILD_RADIUS + s * 0.5)
+	if warn and ok:
+		_hint.text = "Осторожно: рядом лагерь нейтралов — они нападут на стройку"
 	(_ghost.mesh as BoxMesh).size = Vector3(s, 0.06, s)      # основание — клетки, которые займёт здание
 	_ghost.position = _at(center, 0.05)
-	(_ghost.material_override as StandardMaterial3D).albedo_color = Color(0.2, 1.0, 0.3, 0.35) if ok else Color(1.0, 0.2, 0.2, 0.45)
+	(_ghost.material_override as StandardMaterial3D).albedo_color = (Color(1.0, 0.75, 0.2, 0.4) if warn else Color(0.2, 1.0, 0.3, 0.35)) if ok else Color(1.0, 0.2, 0.2, 0.45)
 	_ghost_model.visible = true
 	_ghost_model.position = _at(center, -0.05)
 	_ghost_model.rotation.y = _building_facing(center)
-	_ghost_mat.albedo_color = Color(0.35, 1.0, 0.45, 0.42) if ok else Color(1.0, 0.3, 0.25, 0.42)
+	_ghost_mat.albedo_color = (Color(1.0, 0.8, 0.3, 0.42) if warn else Color(0.35, 1.0, 0.45, 0.42)) if ok else Color(1.0, 0.3, 0.25, 0.42)
 
 
 func _place() -> void:
@@ -3946,6 +4419,7 @@ var _hover_mat: StandardMaterial3D
 var _hover_frame := 0
 var _fireflies: CPUParticles3D
 var _vignette: ShaderMaterial
+var _vignette_rect: ColorRect
 var _sun_night := 0.0             # 0 — день, 1 — ночь (плавно)
 var _weather: CPUParticles3D      # снег / листья / пыль по местности
 var _rain: CPUParticles3D         # дождь во время грозы
@@ -4051,6 +4525,7 @@ void fragment() {
 	_vignette.shader = sh
 	rect.material = _vignette
 	layer.add_child(rect)
+	_vignette_rect = rect
 	# подсветка того, что под курсором
 	_hover_mat = _flat(Color(1, 1, 1, 0.75), true)
 	_hover_mat.no_depth_test = true
@@ -4456,6 +4931,17 @@ func _update_daylight() -> void:
 	var t := float(sim.tick % Sim.DAY_CYCLE) + _acc / Sim.TICK_DT
 	var n := smoothstep(Sim.DAY_LEN - 200.0, Sim.DAY_LEN, t) - smoothstep(Sim.DAY_CYCLE - 200.0, Sim.DAY_CYCLE, t)
 	_sun_night = n
+	# свет и часы трогаем, только когда что-то заметно изменилось (обычно — раз в секунду, а не каждый кадр)
+	var light_key := "%d|%s|%s" % [roundi(n * 400.0), sim.blood_moon(), sim.storm()]
+	var clock_key := "%d|%s" % [int(sim.tick * Sim.TICK_DT), sim.is_night()]
+	if light_key == _light_key and clock_key == _clock_key:
+		return
+	var light_changed := light_key != _light_key
+	_light_key = light_key
+	_clock_key = clock_key
+	if not light_changed:
+		_update_clock()
+		return
 	_sun.light_energy = lerpf(1.25, 0.52, n)
 	_sun.light_color = Color("#ffe6c4").lerp(Color("#b4c0e8"), n)
 	_env.ambient_light_color = Color("#7f8a98").lerp(Color("#66708e"), n)
@@ -4469,6 +4955,14 @@ func _update_daylight() -> void:
 		_sun.light_energy *= 0.6
 		_env.background_color = _env.background_color.lerp(Color("#3a4048"), 0.5)
 	_env.fog_light_color = _env.background_color
+	_update_clock()
+
+
+var _light_key := ""
+var _clock_key := ""
+
+
+func _update_clock() -> void:
 	if _clock_label != null:
 		var left := sim.phase_left()
 		_clock_label.text = "%s   ·   %s ещё %s" % [_clock(sim.tick * Sim.TICK_DT), "ночь" if sim.is_night() else "день", _clock(left)]
@@ -4601,6 +5095,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			for id in sim.units:
 				if int(sim.units[id]["player"]) == local_player and not sim.is_worker(sim.units[id]):
 					selected.append(id)
+		elif code == KEY_SPACE and _alert_pos.x >= 0.0 and _time - _alert_time < 8.0:      # к месту последней тревоги
+			_focus(_alert_pos)
+			_alert_pos = Vector2(-1, -1)
 		elif code == KEY_SPACE:      # камера на главное здание
 			for id in sim.buildings:
 				var hb: Dictionary = sim.buildings[id]
@@ -4878,13 +5375,13 @@ func _ground_point(screen: Vector2):
 	var prev := t
 	while t < end:
 		var p := from + dir * t
-		if p.y <= terrain.height(Vector2(p.x, p.z)):
+		if p.y <= terrain.h_at(Vector2(p.x, p.z)):
 			var lo := prev
 			var hi := t
 			for i in 8:
 				var mid := (lo + hi) * 0.5
 				var q := from + dir * mid
-				if q.y <= terrain.height(Vector2(q.x, q.z)):
+				if q.y <= terrain.h_at(Vector2(q.x, q.z)):
 					hi = mid
 				else:
 					lo = mid
@@ -4896,7 +5393,7 @@ func _ground_point(screen: Vector2):
 
 ## Точка на карте -> точка в 3D с учётом высоты земли.
 func _at(p: Vector2, lift: float = 0.0) -> Vector3:
-	return Vector3(p.x, terrain.height(p) + lift, p.y)
+	return Vector3(p.x, terrain.h_at(p) + lift, p.y)
 
 
 ## Материал отметок приказа: рисуется поверх всего, чтобы деревья и юниты её не закрывали.
@@ -4989,7 +5486,7 @@ func _mark_entity(id: int, color: Color) -> void:
 	elif sim.buildings.has(id):
 		_mark_target(bviews.get(id), sim.buildings[id]["pos"], float(sim.buildings[id]["size"]) * 0.75, color)
 	elif sim.resources.has(id):
-		_mark_target(rviews.get(id), sim.resources[id]["pos"], float(sim.resources[id]["size"]) * 0.75 + 0.25, color)
+		_mark_target(_res_node(int(id)), sim.resources[id]["pos"], float(sim.resources[id]["size"]) * 0.75 + 0.25, color)
 	elif sim.loot.has(id):
 		_mark_target(lviews.get(id), sim.loot[id]["pos"], 0.6, color)
 

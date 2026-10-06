@@ -4,6 +4,36 @@
 	"description": "Твердыня: крепкая броня, порох и рунная магия. Боец, простоявший на месте 2 секунды, окапывается (+3 брони, +15% урона). Рудокопы приносят больше золота, а из камня можно класть стены.",
 	"unit_traits": {"entrench": true},
 	"units": {
+		"ram_rider": {
+			"name": "Горный баран", "role": "melee", "level": 3, "tier": 2,
+			"description": "Боевой баран с рогами-таранами. Натиск: врезается с разбега — двойной урон и оглушение. Окапываться не умеет, зато быстрее всех гномов.",
+			"cost": {"gold": 185, "wood": 40}, "supply": 3, "build_time": 24,
+			"hp": 680, "damage": 20, "attack_cooldown": 1.3, "range": 0.6, "damage_type": "normal",
+			"armor": 3, "armor_type": "medium", "speed": 4.0, "radius": 0.6, "mana": 0, "mana_regen": 0,
+			"charge": {"mul": 2.0, "stun": 0.8, "after": 1.5}, "lacks": ["entrench"],
+			"model": {"shape": "wolf", "scale": 1.35, "fur": "#d8d0c0"},
+			"hotkey": "T"
+		},
+		"sapper": {
+			"name": "Подрывник", "role": "elite", "level": 3, "tier": 2,
+			"description": "Безумец с бочонком пороха. Подбегает к цели и взрывается: 260 осадного урона всем врагам и зданиям вокруг. Сам погибает.",
+			"cost": {"gold": 125, "wood": 60}, "supply": 2, "build_time": 18,
+			"hp": 300, "damage": 1, "attack_cooldown": 1.0, "range": 0.5, "damage_type": "siege",
+			"armor": 1, "armor_type": "medium", "speed": 3.6, "radius": 0.4, "mana": 0, "mana_regen": 0,
+			"kamikaze": {"radius": 2.4, "damage": 260, "type": "siege", "color": "#ff9a3a"},
+			"model": {"shape": "humanoid", "scale": 0.8, "bulk": 1.2, "skin": "#e0b08a", "cloth": "#b03a2a", "pants": "#3a2a1a", "weapon": "rock", "head": "hat", "beard": "#e06a1a"},
+			"hotkey": "Q"
+		},
+		"rune_guardian": {
+			"name": "Рунный страж", "role": "heavy", "level": 5, "tier": 3,
+			"description": "Каменный исполин, оживлённый рунами. Удары оглушают (25%), а кто бьёт его вблизи, получает пятую часть урона обратно.",
+			"cost": {"gold": 320, "wood": 130}, "supply": 6, "build_time": 40,
+			"hp": 1700, "damage": 40, "attack_cooldown": 2.0, "range": 0.8, "damage_type": "normal",
+			"armor": 7, "armor_type": "heavy", "speed": 2.4, "radius": 0.75, "mana": 0, "mana_regen": 0,
+			"bash": {"chance": 0.25, "stun": 1.2}, "thorns": 0.2,
+			"model": {"shape": "humanoid", "scale": 1.7, "bulk": 1.7, "skin": "#7a8290", "cloth": "#5a6270", "pants": "#4a5260", "weapon": "fists", "head": "helmet", "rocky": true, "orb": "#6ad0ff"},
+			"hotkey": "E"
+		},
 		"worker": {
 			"name": "Гном-рудокоп", "role": "worker", "level": 1,
 			"cost": {"gold": 75, "wood": 0}, "supply": 1, "build_time": 13,
@@ -173,14 +203,17 @@
 	},
 	"buildings": {
 		"supply": {"name": "Каменный дом", "role": "supply", "hotkey": "Q", "cost": {"gold": 80, "wood": 30}, "build_time": 26, "hp": 750, "armor": 6, "armor_type": "fortified", "size": 2, "mana": 0, "mana_regen": 0, "model": {"shape": "dwarf_house"}, "supply_given": 8},
-		"barracks": {"name": "Казарма клана", "role": "barracks", "hotkey": "E", "cost": {"gold": 170, "wood": 60}, "build_time": 45, "hp": 1450, "armor": 6, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "dwarf_barracks"}, "trains": ["melee", "ranged", "heavy"]},
+		"barracks": {"name": "Казарма клана", "role": "barracks", "hotkey": "E", "cost": {"gold": 170, "wood": 60}, "build_time": 45, "hp": 1450, "armor": 6, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "dwarf_barracks"}, "trains": ["melee", "ranged", "heavy", "ram_rider"]},
 		"tower": {"name": "Пушечная башня", "role": "tower", "hotkey": "R", "cost": {"gold": 130, "wood": 90}, "build_time": 42, "hp": 700, "armor": 6, "armor_type": "fortified", "size": 2, "mana": 0, "mana_regen": 0, "model": {"shape": "dwarf_tower"}, "damage": 24, "attack_cooldown": 1.6, "range": 8.5, "damage_type": "siege"},
 		"hall": {"name": "Горный чертог", "role": "hall", "hotkey": "T", "cost": {"gold": 385, "wood": 205}, "build_time": 90, "hp": 1900, "armor": 6, "armor_type": "fortified", "size": 4, "mana": 0, "mana_regen": 0, "model": {"shape": "dwarf_hall"}, "supply_given": 15, "trains": ["worker"], "researches": ["tier"]},
 		"altar": {"name": "Зал предков", "role": "altar", "hotkey": "F", "cost": {"gold": 180, "wood": 50}, "build_time": 45, "hp": 1000, "armor": 6, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "dwarf_altar"}, "trains": ["mountain_thane", "runesmith", "powder_master", "gatekeeper"]},
-		"forge": {"name": "Рунная кузня", "role": "forge", "hotkey": "G", "cost": {"gold": 140, "wood": 60}, "build_time": 40, "hp": 1000, "armor": 6, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "dwarf_forge"}, "researches": ["weapons", "armor"]},
+		"forge": {"name": "Рунная кузня", "role": "forge", "hotkey": "G", "cost": {"gold": 140, "wood": 60}, "build_time": 40, "hp": 1000, "armor": 6, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "dwarf_forge"}, "researches": ["weapons", "armor", "scopes", "tower_shields", "black_powder"]},
 		"temple": {"name": "Святилище рун", "role": "temple", "hotkey": "V", "cost": {"gold": 175, "wood": 80}, "build_time": 45, "hp": 1100, "armor": 6, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "dwarf_shrine"}, "trains": ["rune_priest", "flamer", "drummer"]},
 		"wall": {"name": "Каменная стена", "role": "wall", "hotkey": "N", "cost": {"gold": 10, "wood": 15}, "build_time": 6, "hp": 520, "armor": 8, "armor_type": "fortified", "size": 1, "mana": 0, "mana_regen": 0, "model": {"shape": "dwarf_wall"},
 			"description": "Кусок крепостной стены 1×1: перекрывает проходы. Ставьте рядами, оставляя ворота для своих."},
+		"elite": {"name": "Зал ветеранов", "role": "elite", "hotkey": "Y", "tier": 2, "cost": {"gold": 230, "wood": 120}, "build_time": 55, "hp": 1700, "armor": 6, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0,
+			"model": {"shape": "dwarf_barracks", "elite": true, "trim": "#ffb03a"}, "trains": ["sapper", "rune_guardian"],
+			"description": "Элитные казармы. Строятся после улучшения главного здания до 2 уровня; нужны для 3 уровня."},
 		"workshop": {"name": "Паровая мастерская", "role": "workshop", "hotkey": "B", "cost": {"gold": 190, "wood": 140}, "build_time": 50, "hp": 1200, "armor": 6, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "dwarf_works"}, "trains": ["mortar"]}
 	},
 	"start": {
@@ -192,6 +225,13 @@
 	"upgrades": {
 		"weapons": {"name": "Гномья сталь", "hotkey": "Q", "icon": "axe", "color": "#c3c9d1", "max": 3, "cost": {"gold": 150, "wood": 75}, "time": 40, "mods": {"damage_mul": 1.1}, "description": "Все ваши юниты наносят на 10% больше урона за каждый уровень."},
 		"armor": {"name": "Мифриловые пластины", "hotkey": "E", "icon": "shield", "color": "#9fd0ff", "max": 3, "cost": {"gold": 160, "wood": 100}, "time": 40, "mods": {"armor_add": 1}, "description": "Все ваши юниты получают +1 брони за каждый уровень."},
-		"tier": {"name": "Сердце горы", "hotkey": "E", "icon": "crown", "color": "#ffb03a", "max": 1, "cost": {"gold": 320, "wood": 210}, "time": 70, "mods": {}, "hall_hp": 600, "description": "Второй уровень главного здания. Открывает «Громобоя», «Мортиру» и найм второго героя, главное здание получает +600 прочности."}
+		"tier": {"name": "Сердце горы", "hotkey": "E", "icon": "crown", "color": "#ffb03a", "max": 2, "cost": {"gold": 320, "wood": 210}, "costs": [{"gold": 320, "wood": 210}, {"gold": 720, "wood": 480}], "times": [70, 100], "mods": {}, "hall_hp": 600,
+			"description": "Уровень 2 (Сердце горы): открывает «Громобоя», «Горного барана», «Мортиру», зал ветеранов, «Ростовые щиты» и второго героя.\nУровень 3 (Трон под горой): открывает «Рунного стража» и третьего героя. Нужны готовые зал предков, святилище рун и зал ветеранов.\nКаждый уровень: главное здание +600 прочности."},
+		"scopes": {"name": "Подзорные прицелы", "hotkey": "R", "icon": "target", "color": "#c9ced6", "max": 2, "cost": {"gold": 110, "wood": 80}, "time": 35,
+			"units": ["ranged"], "mods": {"range_add": 0.75}, "description": "Стрелки бьют дальше: +0,75 к дальности за уровень."},
+		"tower_shields": {"name": "Ростовые щиты", "hotkey": "T", "icon": "shield", "color": "#9fd0ff", "max": 2, "cost": {"gold": 130, "wood": 90}, "time": 40, "tier": 2,
+			"units": ["melee", "heavy", "rune_guardian"], "mods": {"hp_add": 60}, "description": "Щитоносцы, громобои и рунные стражи: +60 здоровья за уровень (и уже нанятые тоже)."},
+		"black_powder": {"name": "Чёрный порох", "hotkey": "F", "icon": "fire", "color": "#ff7a2a", "max": 2, "cost": {"gold": 120, "wood": 90}, "time": 35,
+			"units": ["mortar", "flamer"], "mods": {"damage_mul": 1.12}, "description": "Мортиры и огнемётчики бьют на 12% сильнее за уровень."}
 	}
 }

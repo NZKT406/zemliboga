@@ -1,4 +1,4 @@
-extends RefCounted
+﻿extends RefCounted
 ## Компьютерный противник. Он не жульничает с правилами: управляет своей стороной
 ## теми же командами, что и игрок (sim.push_command). Думает раз в секунду.
 
@@ -46,6 +46,7 @@ func think() -> void:
 	_economy()
 	_construction()
 	_production()
+	_hire_mercs()
 	_military()
 	_learn_skills()
 	_help_allies()
@@ -158,7 +159,7 @@ func _economy() -> void:
 				gold.append(id)
 			else:
 				wood.append(id)
-		elif kind != "build" and kind != "repair":
+		elif kind != "build" and kind != "repair" and kind != "flee":      # убегающего не трогаем — сам вернётся к делу
 			idle.append(id)
 	_repair_base(idle)
 	var p: Dictionary = sim.players[me]
@@ -262,6 +263,8 @@ func _construction() -> void:
 		want = "temple"
 	elif _count("workshop") == 0 and defs.has("workshop") and not _p["slow"] and sim.tier(me) >= 2:
 		want = "workshop"
+	elif _count("elite") == 0 and defs.has("elite") and not _p["slow"] and sim.tier(me) >= 2 and _count("temple") > 0:
+		want = "elite"
 	elif _count("barracks") < int(_p["barracks"]) and sim.tick > 2400 and int(p["gold"]) > 500:
 		want = "barracks"
 	elif _count("tower") < int(_p["towers"]) and sim.tick > 4200:
@@ -299,7 +302,7 @@ func _find_spot(size: int, front: bool) -> Vector2i:
 			var a := (PI if not front else 0.0) + (float((step + 1) / 2) * (PI / 7.0)) * (1.0 if step % 2 == 0 else -1.0)
 			var c := _base + to_center.rotated(a) * float(ring)
 			var cell := Vector2i(c) - Vector2i(size / 2, size / 2)
-			if sim.can_place(size + 2, cell - Vector2i(1, 1)):
+			if sim.can_place(size + 2, cell - Vector2i(1, 1)) and not sim.guarded_spot(c, Sim.GUARD_BUILD_RADIUS + size * 0.5 + 1.0):
 				return cell
 	return Vector2i(-1, -1)
 
@@ -337,7 +340,10 @@ func _production() -> void:
 				_cmd({"type": "train", "building": bid, "unit": key})
 				return
 	# улучшение главного здания: открывает тяжёлых юнитов и второго героя
-	if (p["data"]["upgrades"] as Dictionary).has("tier") and sim.tier(me) < 2 and not p["research_wip"].has("tier") and _army.size() >= 4 and sim.tick > 1200:
+	var want_tier := sim.tier(me) < 2 and _army.size() >= 4 and sim.tick > 1200
+	if sim.tier(me) == 2 and not _p["slow"] and _army.size() >= 10 and sim.tick > 6000 and sim.tier3_missing(me).is_empty():
+		want_tier = true      # третий уровень: когда войско большое и построены алтарь, храм и элитные казармы
+	if (p["data"]["upgrades"] as Dictionary).has("tier") and want_tier and not p["research_wip"].has("tier"):
 		for bid in _done("hall"):
 			if (sim.buildings[bid]["queue"] as Array).is_empty() and _afford(sim.upgrade_cost(me, "tier")):
 				_cmd({"type": "research", "building": bid, "upgrade": "tier"})
@@ -350,6 +356,8 @@ func _production() -> void:
 			if String(key) == "tier":
 				continue
 			var up: Dictionary = p["data"]["upgrades"][key]
+			if int(up.get("tier", 1)) > sim.tier(me):
+				continue
 			if int(p["upgrades"].get(key, 0)) < int(up.get("max", 3)) and not p["research_wip"].has(key) and _afford(sim.upgrade_cost(me, String(key))):
 				_cmd({"type": "research", "building": bid, "upgrade": key})
 				break
@@ -360,6 +368,11 @@ func _production() -> void:
 		var key := "melee" if melee <= ranged else "ranged"
 		if units.has("heavy") and int(units["heavy"].get("tier", 1)) <= sim.tier(me) and (melee + ranged) % 3 == 2 and _afford(units["heavy"]["cost"]) and _has_supply(units["heavy"]):
 			key = "heavy"
+		elif (melee + ranged) % 4 == 3:      # иногда — особый боец казармы (алебардщик, вепрь, паук...)
+			for extra in b["def"].get("trains", []):
+				if not String(extra) in ["melee", "ranged", "heavy"] and int(units[extra].get("tier", 1)) <= sim.tier(me) and _afford(units[extra]["cost"]) and _has_supply(units[extra]):
+					key = String(extra)
+					break
 		if _afford(units[key]["cost"]) and _has_supply(units[key]):
 			_cmd({"type": "train", "building": bid, "unit": key})
 			if key == "ranged":
@@ -372,6 +385,23 @@ func _production() -> void:
 		var r := String(sim.units[id]["def"].get("role", ""))
 		roles[r] = int(roles.get(r, 0)) + 1
 	var limits := {"healer": 2, "elite": 3, "support": 1, "siege": 2 if String(s.get("difficulty", "normal")) != "hard" else 3}
+	var have: Dictionary = {}      # элитные казармы: каждого вида не больше 4
+	for id in _army:
+		var uk := String(sim.units[id]["key"])
+		have[uk] = int(have.get(uk, 0)) + 1
+	for bid in _done("elite"):
+		var eb: Dictionary = sim.buildings[bid]
+		if not (eb["queue"] as Array).is_empty():
+			continue
+		var opts: Array = eb["def"].get("trains", []).duplicate()
+		opts.reverse()      # сначала самый сильный (3 уровня), если он уже открыт
+		for key in opts:
+			var def: Dictionary = units[key]
+			if int(def.get("tier", 1)) > sim.tier(me) or int(have.get(key, 0)) >= 4:
+				continue
+			if _afford(def["cost"]) and _has_supply(def):
+				_cmd({"type": "train", "building": bid, "unit": key})
+				break
 	for bkey in ["temple", "workshop"]:
 		for bid in _done(bkey):
 			var b: Dictionary = sim.buildings[bid]
@@ -386,6 +416,45 @@ func _production() -> void:
 					_cmd({"type": "train", "building": bid, "unit": key})
 					roles[role] = int(roles.get(role, 0)) + 1
 					break
+
+
+## Наёмники: войско проходит мимо лагеря, а золота в избытке — нанимаем лучшего доступного.
+func _hire_mercs() -> void:
+	var p: Dictionary = sim.players[me]
+	if int(p["gold"]) < 420 or sim.tick < int(s.get("next_hire", 0)):
+		return
+	var ids: Array = sim.buildings.keys()
+	ids.sort()
+	for bid in ids:
+		var b: Dictionary = sim.buildings[bid]
+		if String(b["def"].get("role", "")) != "mercenary" or not b.has("merc"):
+			continue
+		var near := false
+		for uid in sim._units_near(b["pos"], sim.SHOP_RANGE):
+			if int(sim.units[uid]["player"]) == me:
+				near = true
+				break
+		if not near:
+			continue
+		var best := ""
+		var best_gold := 0
+		var offers: Dictionary = sim.merc_offers(b)
+		var keys: Array = offers.keys()
+		keys.sort()
+		for k in keys:
+			var o: Dictionary = offers[k]
+			var def: Dictionary = sim.merc_def(String(k))
+			if int(b["stock"].get(k, 0)) <= 0 or def.is_empty() or not _has_supply(def):
+				continue
+			if int(o.get("gold", 0)) + 250 > int(p["gold"]) or int(o.get("wood", 0)) > int(p["wood"]):
+				continue
+			if int(o.get("gold", 0)) > best_gold:
+				best_gold = int(o.get("gold", 0))
+				best = String(k)
+		if best != "":
+			_cmd({"type": "hire", "building": int(bid), "unit": best})
+			s["next_hire"] = sim.tick + 200
+			return
 
 
 # ---------- армия ----------

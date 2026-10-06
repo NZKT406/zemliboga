@@ -116,11 +116,12 @@ static func sight_of(t: Dictionary) -> float:
 		if String(d.get("role", "")) == "hall":
 			return 12.0
 		return 6.5 + float(t["size"]) * 0.5
+	var up: float = 2.5 if t.get("high", false) else 0.0      # с возвышенности видно дальше (Sim.HIGH_SIGHT)
 	if t["hero"]:
-		return 11.0
+		return 11.0 + up
 	if String(d.get("role", "")) == "worker":
-		return 7.0
-	return maxf(8.5, float(t["range"]) + 3.0)
+		return 7.0 + up
+	return maxf(8.5, float(t["range"]) + 3.0) + up
 
 
 func _stamp(center: Vector2, radius: float) -> void:
