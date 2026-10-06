@@ -20,7 +20,7 @@ signal chat(index, nick, text, allies_only)   # index — номер игрок�
 signal pinged(index, pos)                     # союзник отметил точку на карте
 
 const DEFAULT_PORT := 24600
-const VERSION := "этап 20"        # меняется с каждым обновлением игры: разные версии вместе не играют
+const VERSION := "этап 21"        # меняется с каждым обновлением игры: разные версии вместе не играют
 const ACCOUNTS := "user://accounts.json"
 const MAX_SLOTS := 8
 const MAX_TEAMS := 4
@@ -419,19 +419,27 @@ func _sv_start() -> void:
 		info.append({"kind": p["kind"], "race": p["race"], "nick": p["nick"], "diff": p.get("diff", "normal"), "team": int(p.get("team", 0))})
 	for i in players.size():
 		if String(players[i]["kind"]) == "human":
-			_to(int(players[i]["peer"]), "_cl_start", [seed_value, int(r["size"]), info, i, {"fog": bool(r.get("fog", true))}])
+			_to(int(players[i]["peer"]), "_cl_start", [seed_value, int(r["size"]), info, i, {"fog": bool(r.get("fog", true)), "biome": String(r.get("biome", "any"))}])
 
 
 ## Настройки комнаты, которые меняет только её хозяин (сейчас — туман войны).
+const BIOME_KEYS := ["any", "meadow", "steppe", "autumn", "winter", "lakes", "highlands"]
+
+
 @rpc("any_peer", "call_remote", "reliable")
-func _sv_option(key: String, value: bool) -> void:
+func _sv_option(key: String, value) -> void:
 	var id := _sender()
 	if not is_server or not _room_of.has(id):
 		return
 	var r: Dictionary = _rooms[_room_of[id]]
-	if int(r["host"]) != id or r["started"] or not key in ["fog"]:
+	if int(r["host"]) != id or r["started"]:
 		return
-	r[key] = value
+	if key == "fog" and value is bool:
+		r[key] = value
+	elif key == "biome" and String(value) in BIOME_KEYS:
+		r[key] = String(value)
+	else:
+		return
 	_send_room(r)
 
 
@@ -594,7 +602,7 @@ func _leave_room(id: int) -> void:
 
 
 func _send_room(r: Dictionary) -> void:
-	var view := {"id": r["id"], "name": r["name"], "size": r["size"], "host": r["host"], "slots": r["slots"].duplicate(true), "started": r["started"], "fog": bool(r.get("fog", true))}
+	var view := {"id": r["id"], "name": r["name"], "size": r["size"], "host": r["host"], "slots": r["slots"].duplicate(true), "started": r["started"], "fog": bool(r.get("fog", true)), "biome": String(r.get("biome", "any"))}
 	for s in r["slots"]:
 		if String(s["kind"]) == "human":
 			_to(int(s["peer"]), "_cl_room", [view])
@@ -690,7 +698,7 @@ func start_game() -> void:
 	_srv("_sv_start")
 
 
-func set_option(key: String, value: bool) -> void:
+func set_option(key: String, value) -> void:
 	_srv("_sv_option", [key, value])
 
 
@@ -751,7 +759,7 @@ func _cl_room(state: Dictionary) -> void:
 func _cl_start(seed_value: int, size: int, players: Array, index: int, opts: Dictionary) -> void:
 	my_index = index
 	turns.clear()
-	game_started.emit({"seed": seed_value, "size": size, "players": players, "index": index, "fog": bool(opts.get("fog", true))})
+	game_started.emit({"seed": seed_value, "size": size, "players": players, "index": index, "fog": bool(opts.get("fog", true)), "biome": String(opts.get("biome", "any"))})
 
 
 @rpc("authority", "call_remote", "reliable")

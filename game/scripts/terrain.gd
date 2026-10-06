@@ -25,6 +25,32 @@ var high_river: Array = []      # ручей на плато, который с�
 var high_w := 1.1
 var props: Array = []           # кусты и камни: настоящие препятствия, юниты их обходят
 var prop_cells: Dictionary = {}
+## Местности: цвета земли, вода, кусты и камни, лес, погода. Выбираются перед игрой или случайно.
+const BIOMES := {
+	"meadow": {"name": "Луга", "grass": ["#34472c", "#566a3a"], "dry": "#77703f", "mud": "#4a3d2c", "sand": "#7d7256",
+		"lakes": 1.0, "props": 1.0, "rocks": 0.38, "forest": 1.0, "bush": ["#2f6b3a", "#4f8f3a"], "water": "#21404a", "fog": "#6f777c", "foliage": "", "weather": ""},
+	"steppe": {"name": "Степь", "grass": ["#6a6a34", "#8c8046"], "dry": "#a68e4c", "mud": "#6a5434", "sand": "#9a8a5a",
+		"lakes": 0.35, "props": 0.7, "rocks": 0.62, "forest": 0.4, "bush": ["#6a6a34", "#8a7a3a"], "water": "#2a4a4a", "fog": "#8c8670", "foliage": "steppe", "weather": "dust"},
+	"autumn": {"name": "Осень", "grass": ["#5a4a2a", "#7a5c2c"], "dry": "#9c6a2a", "mud": "#4a3424", "sand": "#7d6a4a",
+		"lakes": 1.0, "props": 1.0, "rocks": 0.35, "forest": 1.15, "bush": ["#8a4a22", "#b8782a"], "water": "#24383e", "fog": "#7a6c5c", "foliage": "autumn", "weather": "leaves"},
+	"winter": {"name": "Зима", "grass": ["#c4ccd4", "#e6ecf2"], "dry": "#b2bcc6", "mud": "#8c939c", "sand": "#a8b0b8",
+		"lakes": 0.9, "props": 0.8, "rocks": 0.5, "forest": 1.0, "bush": ["#9aaab4", "#c8d4dc"], "water": "#6a8a9a", "fog": "#a6b2be", "foliage": "winter", "weather": "snow"},
+	"lakes": {"name": "Озёрный край", "grass": ["#2e4a32", "#4e7044"], "dry": "#6a7444", "mud": "#3a3d2c", "sand": "#7d7256",
+		"lakes": 3.0, "lakes_add": 3, "props": 0.9, "rocks": 0.3, "forest": 0.9, "bush": ["#2f6b3a", "#4f8f3a"], "water": "#1c3a48", "fog": "#6a7a82", "foliage": "", "weather": ""},
+	"highlands": {"name": "Нагорье", "grass": ["#4a4a38", "#6a684a"], "dry": "#7a7454", "mud": "#4a4438", "sand": "#7a7462",
+		"lakes": 0.6, "props": 2.3, "rocks": 0.85, "forest": 0.7, "bush": ["#3f5a3a", "#5a7044"], "water": "#24404a", "fog": "#7c7e80", "foliage": "steppe", "weather": ""},
+}
+var biome := "meadow"
+var B: Dictionary = BIOMES["meadow"]
+
+
+static func biome_for(key: String, map_seed: int) -> String:
+	if BIOMES.has(key):
+		return key
+	var keys: Array = BIOMES.keys()      # «любая»: выбирает зерно карты
+	return String(keys[absi(hash(map_seed * 7 + 3)) % keys.size()])
+
+
 var _soft: Dictionary = {}      # клетка -> трава и цветы в ней (они приминаются под юнитами)
 var _soft_all: Array = []
 var _flat: Dictionary = {}
@@ -33,8 +59,10 @@ var _hidden: Dictionary = {}
 
 ## Вся карта определяется одним числом (зерном). Одинаковое зерно = одинаковая карта,
 ## это понадобится для сетевой игры: игрокам достаточно обменяться зерном.
-func _init(map_seed: int = 0, map_size: int = 96, n_players: int = 2) -> void:
+func _init(map_seed: int = 0, map_size: int = 96, n_players: int = 2, biome_key: String = "meadow") -> void:
 	seed_value = map_seed
+	biome = biome_for(biome_key, map_seed)
+	B = BIOMES[biome]
 	SIZE = map_size
 	CENTER = Vector2(SIZE, SIZE) * 0.5
 	K = float(SIZE) / 96.0
@@ -106,7 +134,8 @@ func _init(map_seed: int = 0, map_size: int = 96, n_players: int = 2) -> void:
 		ramps.append(float(ramps[ramps.size() - 1]) + PI / 2.0)
 
 	# иногда ещё один-два маленьких пруда
-	for i in rng.randi_range(0, 2) + int((AREA - 1.0) * 1.6):     # на больших картах больше озёр
+	var ponds := int(round(float(rng.randi_range(0, 2) + int((AREA - 1.0) * 1.6)) * float(B["lakes"]))) + int(float(B.get("lakes_add", 0)) * sqrt(AREA))
+	for i in ponds:     # на больших картах и в озёрном краю больше озёр
 		for attempt in 30:
 			var p := Vector2(rng.randf_range(14, SIZE - 14), rng.randf_range(14, SIZE - 14))
 			var ok := p.distance_to(CENTER) > vol_out + 8.0 and p.distance_to(plateau_corner) > plateau_r + 9.0
@@ -170,7 +199,7 @@ func outside(p: Vector2) -> float:
 
 
 func _make_props(rng: RandomNumberGenerator) -> void:
-	for i in int(520 * AREA):
+	for i in int(520 * AREA * float(B["props"])):
 		var cell := Vector2i(rng.randi_range(1, SIZE - 2), rng.randi_range(1, SIZE - 2))
 		var p := Vector2(cell) + Vector2(0.5, 0.5)
 		var ok := _grass(p) and plateau(p) < 0.02 and not prop_cells.has(cell) and p.distance_to(CENTER) > vol_out + 2.0
@@ -183,9 +212,9 @@ func _make_props(rng: RandomNumberGenerator) -> void:
 			continue
 		prop_cells[cell] = true
 		var s := rng.randf_range(0.55, 0.95)
-		if rng.randf() < 0.62:
+		if rng.randf() >= float(B["rocks"]):
 			props.append({"kind": "bush", "pos": p, "scale": Vector3(s, s * 0.8, s), "rot": rng.randf() * 6.0,
-				"color": Color("#2f6b3a").lerp(Color("#4f8f3a"), rng.randf())})
+				"color": Color(String(B["bush"][0])).lerp(Color(String(B["bush"][1])), rng.randf())})
 		else:
 			props.append({"kind": "rock", "pos": p, "scale": Vector3(s, s * 0.65, s * rng.randf_range(0.75, 1.1)), "rot": rng.randf() * 6.0,
 				"color": Color("#8d867a").lerp(Color("#a59f92"), rng.randf())})
@@ -266,6 +295,12 @@ func height(p: Vector2) -> float:
 
 func water_level(p: Vector2) -> float:
 	return PLATEAU_H * plateau(p) + WATER_Y
+
+
+## Клетка непроходима только из-за воды (а не скал, плато или вулкана) — по ней плавают наги.
+func swimmable(cell: Vector2i) -> bool:
+	var p := Vector2(cell) + Vector2(0.5, 0.5)
+	return water_dist(p) < 0.7 and ford(p) < 0.5 and plateau(p) <= 0.06 and not prop_cells.has(cell) and not volcano_wall(p)
 
 
 func blocked(cell: Vector2i) -> bool:
@@ -399,15 +434,15 @@ func _ground_color(mid: Vector3, nrm: Vector3) -> Color:
 	elif wd < 0.35:
 		col = Color("#5f5a48").lerp(Color("#8a7f62"), ford(p))                                                 # дно
 	elif wd < 1.7:
-		col = Color("#7d7256").lerp(Color("#4f5a38"), smoothstep(0.9, 1.7, wd)) # песчаный берег
+		col = Color(String(B["sand"])).lerp(Color(String(B["grass"][0])), smoothstep(0.9, 1.7, wd)) # берег
 	else:
 		var t := tint.get_noise_2d(p.x, p.y) * 0.5 + 0.5
-		col = Color("#34472c").lerp(Color("#566a3a"), t)
+		col = Color(String(B["grass"][0])).lerp(Color(String(B["grass"][1])), t)
 		if t > 0.68:
-			col = col.lerp(Color("#77703f"), (t - 0.68) * 2.2)                  # сухая жухлая трава
+			col = col.lerp(Color(String(B["dry"])), (t - 0.68) * 2.2)          # сухая трава (зимой — наст)
 		var mud := noise.get_noise_2d(p.x * 2.3 + 40.0, p.y * 2.3 - 17.0) * 0.5 + 0.5
 		if mud > 0.6:
-			col = col.lerp(Color("#4a3d2c"), minf(1.0, (mud - 0.6) * 3.5))        # пятна голой земли и грязи
+			col = col.lerp(Color(String(B["mud"])), minf(1.0, (mud - 0.6) * 3.5))        # пятна голой земли
 		if pl > 0.9:
 			col = col.lerp(Color("#4a5a4a"), 0.5)                                # трава на плато
 		col = col.darkened(randf() * 0.16)
@@ -418,7 +453,8 @@ func _ground_color(mid: Vector3, nrm: Vector3) -> Color:
 
 func _water_material() -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
-	m.albedo_color = Color(0.13, 0.24, 0.28, 0.86)
+	var wc := Color(String(B["water"]))
+	m.albedo_color = Color(wc.r, wc.g, wc.b, 0.86 if biome != "winter" else 0.93)      # зимой — подо льдом
 	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	m.roughness = 0.15
 	m.metallic = 0.2

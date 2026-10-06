@@ -250,6 +250,8 @@ func _load_data() -> void:
 		var it: Dictionary = neutral["items"][ikey]
 		_lookup[String(ikey)] = {"name": it["name"], "icon": it["icon"], "color": it["color"]}
 	_lookup["chill"] = {"name": "Холод глубин", "icon": "snow", "color": "#7fd0e8"}
+	_lookup["rage"] = {"name": "Ярость орды: удары чаще и сильнее", "icon": "fire", "color": "#ff3a1a"}
+	_lookup["militia"] = {"name": "Ополчение: +12 урона, +3 брони", "icon": "cry", "color": "#ff9a3a"}
 	for rkey in Sim.RUNE_INFO:      # усиления от рун
 		_lookup["rune_" + String(rkey)] = {"name": Sim.RUNE_INFO[rkey]["name"], "icon": "rune", "color": Sim.RUNE_INFO[rkey]["color"]}
 
@@ -427,6 +429,13 @@ func _toggle_row(options: Array, current, on_pick: Callable, width := 380.0, fon
 	return row
 
 
+func _biome_options() -> Array:
+	var out: Array = [["any", "Любая"]]
+	for k in Terrain.BIOMES:
+		out.append([k, String(Terrain.BIOMES[k]["name"]).replace("Озёрный край", "Озёра")])
+	return out
+
+
 func _race_options(with_random := false) -> Array:
 	var out: Array = [["random", "Любая"]] if with_random else []
 	var ids: Array = races.keys()
@@ -466,6 +475,10 @@ func _skirmish_page() -> void:
 		settings["fog"] = on
 		_apply_settings())
 	_menu_box.add_child(fog_box)
+	_menu_box.add_child(_note_label("Местность", Color.WHITE))
+	_menu_box.add_child(_toggle_row(_biome_options(), String(settings.get("biome", "any")), func(v) -> void:
+		settings["biome"] = String(v)
+		_apply_settings(), 470.0, 13))
 	_menu_box.add_child(_note_label("Раса противников", Color.WHITE))
 	_menu_box.add_child(_toggle_row(_race_options(true), enemy_choice, func(v) -> void: enemy_choice = String(v), 470.0, 14))
 	_menu_box.add_child(_note_label("Сложность противников", Color.WHITE))
@@ -707,6 +720,10 @@ func _room_page() -> void:
 	fog_box.add_theme_font_size_override("font_size", 18)
 	fog_box.toggled.connect(func(on: bool) -> void: online.set_option("fog", on))
 	_menu_box.add_child(fog_box)
+	if host:
+		_menu_box.add_child(_toggle_row(_biome_options(), String(r.get("biome", "any")), func(v) -> void: online.set_option("biome", String(v)), 520.0, 13))
+	else:
+		_menu_box.add_child(_note_label("Местность: %s" % String(_biome_options().filter(func(o): return o[0] == String(r.get("biome", "any")))[0][1]), Color.WHITE))
 	# чат комнаты
 	_room_chat_label = _note_label("\n".join(_room_chat) if not _room_chat.is_empty() else "Чат комнаты пуст", Color("#d8e8f0"))
 	_menu_box.add_child(_room_chat_label)
@@ -750,7 +767,7 @@ func _slot_text(slot: int) -> String:
 
 # ---------- настройки (хранятся в отдельном файле и переживают перезапуск) ----------
 
-var settings := {"fullscreen": false, "volume": 80, "hints": true, "show_fps": true, "server": "", "login": "", "fog": true}
+var settings := {"fullscreen": false, "volume": 80, "hints": true, "show_fps": true, "server": "", "login": "", "fog": true, "biome": "any"}
 
 
 func _load_settings() -> void:
@@ -861,7 +878,7 @@ func _start_new(race_id: String) -> void:
 		list.append(races[rid])
 		names.append("Союзник %d" % (i + 1) if i < n_ally else "Компьютер %d" % (i + 1 - n_ally))
 	print("LOG: новая игра, раса=", race_id, " противников=", n_opp - n_ally, " союзников=", n_ally, " сложность=", difficulty, " seed=", map_seed, " размер=", size)
-	var world := MapGen.generate(list, neutral, combat, map_seed, size)
+	var world := MapGen.generate(list, neutral, combat, map_seed, size, String(_test.get("biome", settings.get("biome", "any"))))
 	sim = world["sim"]
 	terrain = world["terrain"]
 	player_names = names
@@ -949,7 +966,7 @@ func _start_online(info: Dictionary) -> void:
 	for p in info["players"]:
 		list.append(races.get(String(p["race"]), races["humans"]))
 		player_names.append(String(p["nick"]))
-	var world := MapGen.generate(list, neutral, combat, int(info["seed"]), int(info["size"]))
+	var world := MapGen.generate(list, neutral, combat, int(info["seed"]), int(info["size"]), String(info.get("biome", "any")))
 	sim = world["sim"]
 	terrain = world["terrain"]
 	for i in (info["players"] as Array).size():      # команды из лобби: союзники не бьют друг друга
@@ -1076,7 +1093,7 @@ func _start_loaded(slot: int = 1) -> void:
 	for p in state["players"]:
 		if int(p) != Sim.NEUTRAL:
 			n_players += 1
-	terrain = Terrain.new(int(state["seed"]), int(state.get("map_size", Sim.MAP_SIZE)), n_players)
+	terrain = Terrain.new(int(state["seed"]), int(state.get("map_size", Sim.MAP_SIZE)), n_players, String(state.get("biome", "meadow")))
 	player_names = data.get("names", [])
 	fog_on = bool(data.get("fog_on", true))
 	sim = Sim.new()
@@ -1085,7 +1102,7 @@ func _start_loaded(slot: int = 1) -> void:
 	for x in sim.map_size:
 		for y in sim.map_size:
 			if terrain.blocked(Vector2i(x, y)):
-				sim.block_cell(Vector2i(x, y))
+				sim.block_cell(Vector2i(x, y), terrain.swimmable(Vector2i(x, y)))
 	sim.load_state(state)
 	_make_ais(data.get("ai", {}))
 	_build_world()
@@ -1106,6 +1123,7 @@ func _center() -> Vector2:
 
 
 func _build_world() -> void:
+	Models.foliage = String(terrain.B.get("foliage", ""))      # листва деревьев по местности
 	var taken: Dictionary = {}   # клетки под деревьями, рудниками и зданиями: там не растут цветы
 	for group in [sim.resources, sim.buildings]:
 		for id in group:
@@ -1199,7 +1217,11 @@ func _friendly(player: int) -> bool:
 
 ## Виден ли сейчас юнит (свои и союзные — всегда, чужие — только не в тумане).
 func _seen(u: Dictionary) -> bool:
-	return fog == null or _friendly(int(u["player"])) or fog.visible_at(u["pos"])
+	if _friendly(int(u["player"])):
+		return true
+	if u.get("hidden", false):
+		return false      # эльф укрылся в ночи — враг его не видит
+	return fog == null or fog.visible_at(u["pos"])
 
 
 ## Здание видно, если оно наше или союзное, или если мы его уже хоть раз видели.
@@ -1658,11 +1680,11 @@ func _make_mini_texture() -> ImageTexture:
 	for y in n:
 		for x in n:
 			var p := Vector2(x + 0.5, y + 0.5)
-			var c := Color("#33452b").lerp(Color("#5a6b3c"), clampf(terrain.height(p) / 1.5, 0.0, 1.0))
+			var c := Color(String(terrain.B["grass"][0])).darkened(0.05).lerp(Color(String(terrain.B["grass"][1])), clampf(terrain.height(p) / 1.5, 0.0, 1.0))
 			if terrain.plateau(p) > 0.4:
 				c = Color("#5a564f")
 			elif terrain.water_dist(p) < 0.4:
-				c = Color("#274650").lerp(Color("#6f8a86"), terrain.ford(p))
+				c = Color(String(terrain.B["water"])).lightened(0.1).lerp(Color("#6f8a86"), terrain.ford(p))
 			elif terrain.prop_cells.has(Vector2i(x, y)):
 				c = c.darkened(0.2)
 			if p.distance_to(terrain.CENTER) < terrain.vol_out - 0.5:
@@ -1677,17 +1699,12 @@ func _make_mini_texture() -> ImageTexture:
 ## Деревья и рудники запекаются в картинку мини-карты (а не рисуются каждый кадр по одному).
 func _bake_mini() -> void:
 	var img: Image = _mini_ground.duplicate()
-	var tree_c := Color("#245a2e")
+	var tree_c: Color = {"autumn": Color("#a8522a"), "winter": Color("#7a8a92"), "steppe": Color("#5a5a2e")}.get(String(terrain.B.get("foliage", "")), Color("#245a2e"))
 	for id in sim.resources:
 		var r: Dictionary = sim.resources[id]
 		if r["kind"] == "tree":
 			img.set_pixelv(r["cell"], tree_c)
-	for id in sim.resources:
-		var r: Dictionary = sim.resources[id]
-		if r["kind"] == "gold":
-			img.fill_rect(Rect2i(r["cell"] - Vector2i(1, 1), Vector2i(5, 5)), Color("#1c1a18"))
-			img.fill_rect(Rect2i(r["cell"], Vector2i(3, 3)), Color("#ffd940"))
-	_mini_tex.update(img)
+	_mini_tex.update(img)      # рудники рисуются значками поверх (см. _draw_mini)
 	_mini_dirty = false
 
 
@@ -1698,10 +1715,19 @@ func _draw_mini() -> void:
 	if _mini_dirty:
 		_bake_mini()
 	_mini.draw_texture_rect(_mini_tex, Rect2(Vector2.ZERO, Vector2(MINI_SIZE, MINI_SIZE)), false)
+	for id in sim.resources:      # рудники — значок-монета
+		var r: Dictionary = sim.resources[id]
+		if String(r["kind"]) == "gold":
+			_mini_icon((r["pos"] as Vector2) * k, "coin", Color("#ffc21a"), 13.0, Color(0.1, 0.08, 0.02))
 	for id in sim.buildings:
 		var b: Dictionary = sim.buildings[id]
 		if bviews.has(id) and not (bviews[id] as Node3D).visible:
 			continue      # чужое здание, которое ещё не видели
+		var icon: Array = MINI_ICONS.get(String(b["def"]["model"].get("shape", "")), []) if int(b["player"]) == Sim.NEUTRAL else []
+		if not icon.is_empty():      # нейтральные строения — значками
+			var own := int(b.get("owner", -1))
+			_mini_icon((b["pos"] as Vector2) * k, String(icon[0]), Color(String(icon[1])), 15.0, _mini_color(own) if own >= 0 else Color(0.08, 0.06, 0.04))
+			continue
 		var rect := Rect2(Vector2(b["cell"]) * k, Vector2(b["size"], b["size"]) * k)
 		_mini.draw_rect(rect.grow(1.0), Color.BLACK)
 		var owner := int(b.get("owner", -1))
@@ -1720,8 +1746,10 @@ func _draw_mini() -> void:
 			continue
 		var pos: Vector2 = (u["pos"] as Vector2) * k
 		var boss: bool = int(u["player"]) == Sim.NEUTRAL and int(u["def"].get("level", 1)) >= 5
-		var size := 5.0 if u["hero"] or boss else 3.0
-		if boss:      # сильные нейтралы видны издалека
+		var size := 5.0 if u["hero"] or boss or u.has("caravan") else 3.0
+		if u.has("caravan"):      # повозка каравана — золотая
+			_mini.draw_rect(Rect2(pos - Vector2(size, size) * 0.5 - Vector2(1.5, 1.5), Vector2(size + 3, size + 3)), Color("#ffd24a"))
+		elif boss:      # сильные нейтралы видны издалека
 			_mini.draw_rect(Rect2(pos - Vector2(size, size) * 0.5 - Vector2(1, 1), Vector2(size + 2, size + 2)), Color("#b0202d"))
 		elif u["hero"]:
 			_mini.draw_rect(Rect2(pos - Vector2(size, size) * 0.5 - Vector2(1, 1), Vector2(size + 2, size + 2)), Color.WHITE)
@@ -1731,6 +1759,20 @@ func _draw_mini() -> void:
 		if fog.visible_at(sim.runes[rid]["pos"]):
 			_mini.draw_colored_polygon(PackedVector2Array([rp + Vector2(0, -4), rp + Vector2(4, 0), rp + Vector2(0, 4), rp + Vector2(-4, 0)]), Color(String(Sim.RUNE_INFO[sim.runes[rid]["kind"]]["color"])))
 	_mini_top.queue_redraw()
+
+
+## Значки нейтральных строений на мини-карте: модель здания -> [значок, цвет].
+const MINI_ICONS := {
+	"shop": ["potion", "#c98aff"], "goblin_mine": ["coin", "#7ad04a"], "merc_camp": ["axe", "#e8743a"],
+	"fountain": ["heal", "#6ad8b0"], "lookout": ["eye", "#9fe8ff"], "merchant": ["crown", "#ff9adf"],
+}
+
+
+## Значок на мини-карте: квадратная иконка в рамке (рамка — цвет хозяина или тёмная).
+func _mini_icon(center: Vector2, kind: String, color: Color, size: float, frame: Color) -> void:
+	var r := Rect2(center - Vector2(size, size) * 0.5, Vector2(size, size))
+	_mini.draw_rect(r.grow(1.5), frame)
+	_mini.draw_texture_rect(Icons.make(kind, color), r, false)
 
 
 ## Поверх тумана: рамка обзора камеры и метки (тревога, сигналы союзников).
@@ -2232,6 +2274,14 @@ func _update_stats() -> void:
 			fx.append({"key": "stun", "icon": "star", "color": "#fff06a", "ratio": 0.0, "tip": "Оглушён: ещё %.1f с" % ((int(u["stun"]) - sim.tick) * Sim.TICK_DT)})
 		if u["hero"] and sim.players[u["player"]].get("dragon_buff", false):
 			fx.append({"key": "dragon", "icon": "fire", "color": "#ff5a1a", "ratio": 0.0, "tip": "Сила дракона (навсегда)\n%s\nЗа победу над красным драконом" % _mods_text(Sim.DRAGON_MODS)})
+		if u.get("entrenched", false):
+			fx.append({"key": "entrench", "icon": "shield", "color": "#c9a24a", "ratio": 0.0, "tip": "Окопался: +3 брони и +15% урона, пока стоит на месте"})
+		if u.get("hidden", false):
+			fx.append({"key": "hidden", "icon": "moon", "color": "#6a5aff", "ratio": 0.0, "tip": "Укрылся в ночи: враги его не видят, пока он стоит и не дерётся"})
+		elif sim.has_trait(u, "shadowmeld") and sim.is_night():
+			fx.append({"key": "meld", "icon": "moon", "color": "#3a3a6a", "ratio": 0.0, "tip": "Ночь: постойте на месте 2 с без боя — и враги перестанут его видеть"})
+		if sim.swims(u) and sim.in_water(u["pos"]):
+			fx.append({"key": "swim", "icon": "regen", "color": "#3aa8d0", "ratio": 0.0, "tip": "Плывёт: в воде восстанавливает %d здоровья в секунду" % int(Sim.WATER_REGEN)})
 		if u["def"].get("undead", false):
 			fx.append({"key": "undead", "icon": "skull", "color": "#6a7a6a", "ratio": 0.0, "tip": "Нежить\nПолучает в %.2f раза больше святого урона\nНочью восстанавливает %d здоровья в секунду%s" % [Sim.HOLY_VS_UNDEAD, int(Sim.NIGHT_UNDEAD_REGEN), " (сейчас ночь)" if sim.is_night() else ""]})
 		for b in u["buffs"]:
@@ -2661,7 +2711,21 @@ func _refresh_card() -> void:
 			var item := _add_card_button(Icons.make(String(up["icon"]), Color(String(up["color"]))), String(up.get("hotkey", "")), tip, _research.bind(String(rkey)), 72, {} if lvl >= int(up["max"]) else sim.upgrade_cost(local_player, String(rkey)))
 			(item["cd"] as Label).text = str(lvl) if lvl > 0 else ""
 			(item["button"] as Button).disabled = lvl >= int(up["max"])
+		for act in (cur["def"].get("actions", []) if cur["done"] else []):      # особые действия здания
+			var atip := "%s   [%s]\n%s\nПерезарядка %d с" % [act["name"], act.get("hotkey", ""), act["description"], int(act.get("cooldown", 60))]
+			_add_card_button(Icons.make(String(act["icon"]), Color(String(act["color"]))), String(act.get("hotkey", "")), atip, _building_action.bind(String(act["key"])))
 	_card_panel.visible = not _card_items.is_empty()
+
+
+func _can_repair(bid: int) -> bool:
+	var b: Dictionary = sim.buildings[bid]
+	return sim.race_trait(local_player, "repair") and b["done"] and float(b["hp"]) < float(b["max_hp"]) \
+		and int(b["player"]) != Sim.NEUTRAL and not sim.enemies(int(b["player"]), local_player)
+
+
+func _building_action(key: String) -> void:
+	if sel_building >= 0 and sim.buildings.has(sel_building):
+		_issue({"type": "action", "player": local_player, "building": sel_building, "action": key})
 
 
 func _add_card_button(icon: Texture2D, hotkey: String, tip: String, action: Callable, px: int = 72, cost: Dictionary = {}) -> Dictionary:
@@ -2909,6 +2973,46 @@ func _consume_events() -> void:
 			"unit_added":
 				if sim.units.has(e["id"]):
 					_make_unit_view(sim.units[e["id"]])
+					if sim.tick > 2:
+						views[e["id"]]["pop"] = 0.0      # новый юнит «вырастает»
+			"world_event":
+				_world_event_shown(e)
+			"caravan_spawned":
+				_announce("Караван разбойников", "По дорогам идёт повозка с награбленным. Разбейте её — золото и артефакт ваши!", Color("#ffd24a"))
+				_mini_pings.append({"pos": e["pos"], "t": 0.0, "color": Color("#ffd24a")})
+				audio.play("horn", -8.0)
+			"caravan_looted":
+				_feed_line("Вы разграбили караван разбойников!" if int(e["player"]) == local_player else "%s разграбил караван разбойников" % _player_name(int(e["player"])), Color("#ffd24a"))
+				if fog.visible_at(e["pos"]):
+					_pillar(e["pos"], Color("#ffd24a"))
+			"lightning":
+				if fog.visible_at(e["pos"]):
+					_lightning(e["pos"])
+			"resource_added":      # метеорит: новое месторождение
+				if sim.resources.has(e["id"]):
+					var rr: Dictionary = sim.resources[e["id"]]
+					var mine_node: Node3D = Models.gold_mine(float(rr["size"]))
+					mine_node.position = _at(rr["pos"], -0.05)
+					add_child(mine_node)
+					rviews[e["id"]] = mine_node
+					_mini_dirty = true
+			"summon_build":      # нежить призывает здание: столб мертвенного света
+				if fog.visible_at(e["pos"]):
+					_pillar(e["pos"], Color("#6aff8a"))
+					_sfx("spell", e["pos"], -4.0)
+			"feast":
+				if views.has(e["id"]) and sim.units.has(e["id"]):
+					_ring_fx(sim.units[e["id"]]["pos"], 1.3, Color("#ff3a1a"))
+			"corpse_removed":
+				if String(e["how"]) == "eaten" and fog.visible_at(e["pos"]):
+					_ring_fx(e["pos"], 0.8, Color("#8a2a2a"))
+			"repair_spark":
+				if fog.visible_at(e["pos"]) and sim.buildings.has(e["id"]):
+					_spark(int(e["id"]))
+					_sfx("chop", e["pos"], -12.0)
+			"horn":      # ополчение: боевой рог у своих и союзников
+				if _friendly(int(e["player"])):
+					audio.play("horn", -3.0)
 			"building_added":
 				if sim.buildings.has(e["id"]):
 					_make_building_view(sim.buildings[e["id"]])
@@ -3000,6 +3104,8 @@ func _consume_events() -> void:
 				var hte = sim.entity(int(e["id"]))
 				if hte != null and fog.visible_at(hte["pos"]):
 					_spark(int(e["id"]))
+				if views.has(e["id"]):
+					views[e["id"]]["flinch"] = 0.22      # юнит вздрагивает от удара
 				var ht = sim.entity(int(e["id"]))
 				if ht != null:
 					_sfx("hit", ht["pos"], -12.0)
@@ -3016,7 +3122,7 @@ func _consume_events() -> void:
 					var v: Dictionary = views[e["id"]]
 					(v["ring"] as Node3D).visible = false
 					(v["fx"] as Node3D).visible = false
-					corpses.append({"node": v["node"], "parts": v["parts"], "t": 0.0})
+					corpses.append({"node": v["node"], "parts": v["parts"], "t": 0.0, "id": int(e["id"]), "keep": sim.corpses.has(e["id"])})
 					views.erase(e["id"])
 			"bounty":
 				if int(e["player"]) == local_player:
@@ -3136,6 +3242,163 @@ func _ring_fx(pos: Vector2, radius: float, color: Color) -> void:
 		tw.tween_callback(ring.queue_free)
 
 
+const WORLD_EVENT_TEXT := {
+	"meteor": ["Падает метеорит!", "Взрыв, а на месте падения — богатое месторождение золота (2500).", "#ff9a3a"],
+	"invasion": ["Набег!", "Орда монстров идёт на базу: %s.", "#ff5a4a"],
+	"merchant": ["Бродячий торговец", "Продаёт редкие артефакты — но уедет через 2,5 минуты.", "#c98aff"],
+	"gold_rush": ["Золотая лихорадка", "90 секунд рабочие приносят в полтора раза больше золота.", "#ffd24a"],
+	"blood_moon": ["Кровавая луна", "Этой ночью нейтралы злее (+30% урона), а награда за них в полтора раза больше.", "#ff3a3a"],
+	"storm": ["Гроза", "90 секунд бьют молнии, а видно хуже. Берегите войска на открытых местах.", "#9ab8ff"],
+}
+
+
+func _world_event_shown(e: Dictionary) -> void:
+	var t: Array = WORLD_EVENT_TEXT.get(String(e["kind"]), ["Событие", "", "#ffffff"])
+	var text := String(t[1])
+	if String(e["kind"]) == "invasion":
+		text = text % ("ВАША" if int(e["player"]) == local_player else _player_name(int(e["player"])))
+	_announce(String(t[0]), text, Color(String(t[2])))
+	audio.play("horn" if String(e["kind"]) in ["invasion", "blood_moon"] else "done", -4.0)
+	if (e["pos"] as Vector2).x >= 0.0:
+		_mini_pings.append({"pos": e["pos"], "t": 0.0, "color": Color(String(t[2]))})
+		if String(e["kind"]) == "meteor":
+			_meteor_fall(e["pos"])
+
+
+var _announce_box: VBoxContainer
+
+
+## Крупное объявление по центру экрана: заголовок и пояснение, через несколько секунд тает.
+func _announce(title: String, text: String, color: Color) -> void:
+	if _announce_box != null and is_instance_valid(_announce_box):
+		_announce_box.queue_free()
+	_announce_box = VBoxContainer.new()
+	_announce_box.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	_announce_box.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_announce_box.position.y = 150
+	_announce_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var t := Label.new()
+	t.text = title
+	t.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	t.add_theme_color_override("font_color", color)
+	_outlined(t, 34)
+	_announce_box.add_child(t)
+	var s := Label.new()
+	s.text = text
+	s.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_outlined(s, 19)
+	_announce_box.add_child(s)
+	_ui.add_child(_announce_box)
+	_feed_line("%s — %s" % [title.trim_suffix("!"), text], color)
+	var tw := create_tween()
+	_announce_box.modulate.a = 0.0
+	tw.tween_property(_announce_box, "modulate:a", 1.0, 0.3)
+	tw.tween_interval(5.5)
+	tw.tween_property(_announce_box, "modulate:a", 0.0, 1.0)
+
+
+## Метеорит: огненный шар падает с неба и взрывается.
+func _meteor_fall(pos: Vector2) -> void:
+	var ball := Node3D.new()
+	Models.ball(ball, 0.8, Vector3.ZERO, Color("#ff7a2a"), Vector3.ONE, true)
+	Models.ball(ball, 0.5, Vector3(0, 0.6, 0), Color("#ffd27a"), Vector3.ONE, true)
+	ball.position = _at(pos, 30.0) + Vector3(-8, 0, -6)
+	add_child(ball)
+	var tw := create_tween()
+	tw.tween_property(ball, "position", _at(pos, 0.5), 0.9).set_ease(Tween.EASE_IN)
+	tw.tween_callback(func() -> void:
+		_ring_fx(pos, 4.0, Color("#ff7a2a"))
+		_pillar(pos, Color("#ff9a3a"))
+		_sfx("crash", pos, 4.0)
+		ball.queue_free())
+
+
+## Молния: яркий зигзаг с неба и вспышка.
+func _lightning(pos: Vector2) -> void:
+	var bolt := Node3D.new()
+	var top := _at(pos, 14.0)
+	var prev := top
+	var rng := RandomNumberGenerator.new()
+	rng.seed = int(pos.x * 131 + pos.y * 17)
+	for i in 6:
+		var nxt := top.lerp(_at(pos, 0.0), (i + 1) / 6.0) + (Vector3(rng.randf_range(-0.8, 0.8), 0, rng.randf_range(-0.8, 0.8)) if i < 5 else Vector3.ZERO)
+		var seg := MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = Vector3(0.12, 0.12, prev.distance_to(nxt))
+		seg.mesh = bm
+		seg.material_override = _flat(Color("#e8f0ff"))
+		bolt.add_child(seg)
+		seg.position = (prev + nxt) * 0.5
+		seg.look_at_from_position(seg.position, nxt, Vector3.RIGHT)
+		prev = nxt
+	add_child(bolt)
+	var light := OmniLight3D.new()
+	light.light_color = Color("#cfe0ff")
+	light.light_energy = 6.0
+	light.omni_range = 14.0
+	light.position = _at(pos, 3.0)
+	add_child(light)
+	_ring_fx(pos, 1.6, Color("#cfe0ff"))
+	_sfx("crash", pos, 2.0)
+	var tw := create_tween()
+	tw.tween_interval(0.18)
+	tw.tween_callback(func() -> void:
+		bolt.queue_free()
+		light.queue_free())
+
+
+## Столб света (нежить призывает здание): вырастает и тает.
+func _pillar(pos: Vector2, color: Color) -> void:
+	var mi := MeshInstance3D.new()
+	var cyl := CylinderMesh.new()
+	cyl.top_radius = 0.5
+	cyl.bottom_radius = 0.9
+	cyl.height = 4.0
+	cyl.radial_segments = 10
+	mi.mesh = cyl
+	var m := _flat(Color(color.r, color.g, color.b, 0.55), true)
+	m.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	mi.material_override = m
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mi.position = _at(pos, 2.0)
+	mi.scale = Vector3(0.3, 0.05, 0.3)
+	add_child(mi)
+	var tw := create_tween()
+	tw.tween_property(mi, "scale", Vector3(1.0, 1.0, 1.0), 0.35).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.tween_property(m, "albedo_color:a", 0.0, 1.1)
+	tw.tween_callback(mi.queue_free)
+	_ring_fx(pos, 2.5, color)
+
+
+## Рябь на воде вокруг плывущего нага.
+func _ripple(v: Dictionary, on: bool) -> void:
+	if not on and not v.has("ripple"):
+		return
+	if not v.has("ripple"):
+		var r := _torus(0.8, 0.05, Color(0.8, 0.95, 1.0), 24)
+		r.material_override = _flat(Color(0.8, 0.95, 1.0, 0.5), true)
+		r.scale.y = 0.2
+		(v["node"] as Node3D).add_child(r)
+		v["ripple"] = r
+	var ring: MeshInstance3D = v["ripple"]
+	ring.visible = on
+	if on:
+		var k := fmod(_time * 0.9 + float(v["phase"]), 1.0)
+		ring.scale = Vector3(0.6 + k * 0.9, 0.2, 0.6 + k * 0.9) / maxf(0.5, (v["node"] as Node3D).scale.x)
+		ring.position.y = 0.28 * float(v["parts"]["scale"])
+		(ring.material_override as StandardMaterial3D).albedo_color.a = 0.55 * (1.0 - k)
+
+
+## Эльф укрылся в ночи: свои видят его полупрозрачным.
+func _shadowmeld_look(v: Dictionary, u: Dictionary) -> void:
+	var ghost: bool = u.get("hidden", false)
+	if ghost == bool(v.get("ghost", false)):
+		return
+	v["ghost"] = ghost
+	for mi in (v["node"] as Node3D).find_children("*", "MeshInstance3D", true, false):
+		(mi as GeometryInstance3D).transparency = 0.6 if ghost else 0.0
+
+
 func _collapse(node: Node3D) -> void:
 	var tw := create_tween()
 	tw.tween_property(node, "scale", Vector3(1.05, 0.05, 1.05), 0.6)
@@ -3243,6 +3506,20 @@ func _update_views(delta: float) -> void:
 		node.position = _at(p)
 		var stunned: bool = sim.tick < int(u["stun"])
 		var working: bool = u["busy"] and float(u["swing"]) < 0.0 and sim.is_worker(u)
+		# особые позы рас: наги плывут, гномы окапываются, гули едят
+		var swimming: bool = sim.swims(u) and sim.in_water(u["pos"])
+		if swimming:
+			node.position.y = terrain.water_level(p) - 0.3 * float(v["parts"]["scale"]) + sin(_time * 2.4 + float(id)) * 0.05
+		v["pose"] = "swim" if swimming else ("eat" if String(u["order"].get("type")) == "eat" and u["busy"] else ("entrench" if u.get("entrenched", false) and not moving else ""))
+		_ripple(v, swimming)
+		_shadowmeld_look(v, u)
+		if v.has("pop"):      # только что появился: вырастает с лёгким пружинящим перехлёстом
+			v["pop"] = float(v["pop"]) + delta
+			var k: float = clampf(float(v["pop"]) / 0.4, 0.0, 1.0)
+			node.scale = Vector3.ONE * (0.3 + 0.7 * k + sin(k * PI) * 0.18)
+			if k >= 1.0:
+				node.scale = Vector3.ONE
+				v.erase("pop")
 		Anim.animate(v, moving, float(u["speed"]), working, 0.0 if stunned else delta, _time)
 		(v["ring"] as Node3D).visible = selected.has(id) or id == inspect
 		((v["ring"] as MeshInstance3D).material_override as StandardMaterial3D).albedo_color = Color("#3cff5a") if int(u["player"]) == local_player else Color("#ff5a4a")
@@ -3251,11 +3528,19 @@ func _update_views(delta: float) -> void:
 		fx.visible = stunned or not buffs.is_empty()
 		if fx.visible:
 			var slowed := false
+			var raging := false
 			for b in buffs:
 				if float(b["mods"].get("speed_mul", 1.0)) < 1.0:
 					slowed = true
-			(fx.material_override as StandardMaterial3D).albedo_color = Color("#fff06a") if stunned else (Color("#7fd6ff") if slowed else Color("#ff9a3a"))
-			fx.rotation.y = _time * 3.0
+				if String(b["key"]) == "rage":
+					raging = true
+			(fx.material_override as StandardMaterial3D).albedo_color = Color("#fff06a") if stunned else (Color("#7fd6ff") if slowed else (Color("#ff2a10") if raging else Color("#ff9a3a")))
+			fx.rotation.y = _time * (3.0 + 2.0 * int(u.get("rage", 0)) * int(raging))
+			if raging:      # ярость огра: кольцо пульсирует тем сильнее, чем больше ступеней
+				var pulse := 1.0 + 0.06 * int(u.get("rage", 1)) * (0.5 + 0.5 * sin(_time * 12.0))
+				fx.scale = Vector3(pulse, 0.2, pulse)
+			else:
+				fx.scale = Vector3(1.0, 0.2, 1.0)
 		var parts: Dictionary = v["parts"]
 		if parts["gold"] != null:
 			var carrying: bool = int(u["carry"]) > 0
@@ -3283,6 +3568,8 @@ func _update_views(delta: float) -> void:
 		(bviews[id] as Node3D).scale = Vector3(grown, grown * (1.0 if b["done"] else lerpf(0.12, 1.0, float(b["progress"]))), grown)
 	var keep: Array = []
 	for c in corpses:
+		if c.get("keep", false) and not sim.corpses.has(c.get("id", -1)):
+			c["keep"] = false      # тело съели, подняли или оно истлело — уходит в землю
 		if Anim.die(c, delta):
 			(c["node"] as Node3D).queue_free()
 		else:
@@ -3476,7 +3763,8 @@ func _draw_bars() -> void:
 	var far_sq := pow(30.0 + _zoom * 1.6, 2.0)
 	for id in bviews:
 		var b: Dictionary = sim.buildings[id]
-		if b["done"] and float(b["hp"]) >= float(b["max_hp"]) and id != sel_building and (b["queue"] as Array).is_empty():
+		var well: bool = b["def"].has("well") and b["done"] and _friendly(int(b["player"]))
+		if b["done"] and float(b["hp"]) >= float(b["max_hp"]) and id != sel_building and (b["queue"] as Array).is_empty() and not well:
 			continue
 		if (b["pos"] as Vector2).distance_squared_to(eye) > far_sq:
 			continue
@@ -3490,8 +3778,10 @@ func _draw_bars() -> void:
 			continue
 		var w := 26.0 * float(b["size"]) * k
 		_bar(sp, w, 6.0 * k, float(b["hp"]) / float(b["max_hp"]), Color("#3ddc55") if int(b["player"]) == local_player else (Color("#e8c23a") if int(b["player"]) == Sim.NEUTRAL else Color("#ff5a4a")))
+		if well:      # лунный колодец: запас лунной силы
+			_bar(sp + Vector2(0, 8.0 * k), w, 4.0 * k, float(b.get("energy", 0.0)) / float(b["def"]["well"].get("max", 250)), Color("#6ab8ff"))
 		if not b["done"]:
-			_bar(sp + Vector2(0, 8.0 * k), w, 4.0 * k, float(b["progress"]), Color("#e8e2cf"))
+			_bar(sp + Vector2(0, 8.0 * k), w, 4.0 * k, float(b["progress"]), Color("#e8e2cf") if not b.get("auto", false) else Color("#6aff8a"))
 		elif not (b["queue"] as Array).is_empty() and int(b["player"]) == local_player:
 			var q: Dictionary = b["queue"][0]
 			_bar(sp + Vector2(0, 8.0 * k), w, 4.0 * k, 1.0 - float(q["left"]) / float(q["total"]), Color("#4ac8ff"))
@@ -3625,6 +3915,9 @@ func _update_ghost() -> void:
 		return
 	_ghost_cell = Vector2i(roundi(hit.x - s * 0.5), roundi(hit.z - s * 0.5))
 	var ok := sim.can_place(s, _ghost_cell) and sim.can_afford(local_player, def.get("cost", {}))
+	if String(def.get("role", "")) == "hall" and not sim.hall_spot_ok(_ghost_cell, s):
+		ok = false      # слишком близко к руднику
+		_hint.text = "Главное здание нельзя ставить вплотную к руднику — отступите на %d клетки" % Sim.HALL_MINE_GAP
 	var center := Vector2(_ghost_cell) + Vector2(s, s) * 0.5
 	(_ghost.mesh as BoxMesh).size = Vector3(s, 0.06, s)      # основание — клетки, которые займёт здание
 	_ghost.position = _at(center, 0.05)
@@ -3654,6 +3947,8 @@ var _hover_frame := 0
 var _fireflies: CPUParticles3D
 var _vignette: ShaderMaterial
 var _sun_night := 0.0             # 0 — день, 1 — ночь (плавно)
+var _weather: CPUParticles3D      # снег / листья / пыль по местности
+var _rain: CPUParticles3D         # дождь во время грозы
 
 
 ## Курсор рисуется кодом: многоугольники с тёмной обводкой (32×32).
@@ -3804,7 +4099,62 @@ void fragment() {
 	_fireflies.position = Vector3(0, 1.4, 4)
 	_fireflies.emitting = false
 	_rig.add_child(_fireflies)
+	# погода местности (снег, листопад, пыль) и дождь в грозу
+	var w := String(terrain.B.get("weather", ""))
+	if w != "":
+		_weather = _particles({"snow": [Color("#f4f8ff"), 0.07, 140, Vector3(0.3, -1.2, 0.1), 6.0],
+			"leaves": [Color("#d8822a"), 0.09, 60, Vector3(0.8, -0.7, 0.3), 7.0],
+			"dust": [Color("#c8b88a"), 0.06, 70, Vector3(1.4, 0.05, 0.4), 6.0]}[w], w == "leaves")
+	_rain = _particles([Color("#9ab8d8"), 0.04, 260, Vector3(0.6, -12.0, 0.2), 1.1], false)
+	_rain.emitting = false
 	_make_cursors()
+
+
+## Частицы над камерой: [цвет, размер, сколько, скорость, время жизни]; flat — листья (плоские, кружатся).
+func _particles(spec: Array, flat: bool) -> CPUParticles3D:
+	var p := CPUParticles3D.new()
+	p.amount = int(spec[2])
+	p.lifetime = float(spec[4])
+	p.preprocess = float(spec[4])
+	p.local_coords = false
+	p.emission_shape = CPUParticles3D.EMISSION_SHAPE_BOX
+	p.emission_box_extents = Vector3(26, 1.0, 20)
+	p.direction = (spec[3] as Vector3).normalized()
+	p.spread = 12.0
+	p.initial_velocity_min = (spec[3] as Vector3).length() * 0.7
+	p.initial_velocity_max = (spec[3] as Vector3).length() * 1.2
+	p.gravity = Vector3.ZERO
+	if flat:
+		p.angular_velocity_min = -180.0
+		p.angular_velocity_max = 180.0
+		p.particle_flag_rotate_y = true
+	var m: Mesh
+	if (spec[3] as Vector3).y < -5.0:      # дождь — вытянутые капли
+		var b := BoxMesh.new()
+		b.size = Vector3(0.02, 0.5, 0.02)
+		m = b
+	elif flat:
+		var b2 := BoxMesh.new()
+		b2.size = Vector3(float(spec[1]) * 2.0, 0.01, float(spec[1]) * 1.4)
+		m = b2
+	else:
+		var s := SphereMesh.new()
+		s.radius = float(spec[1])
+		s.height = float(spec[1]) * 2.0
+		s.radial_segments = 4
+		s.rings = 2
+		m = s
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = spec[0]
+	if (spec[3] as Vector3).y < -5.0:
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.albedo_color.a = 0.5
+	(m as PrimitiveMesh).material = mat
+	p.mesh = m
+	p.position = Vector3(0, 9.0 if (spec[3] as Vector3).y < -5.0 else 6.0, 3)
+	_rig.add_child(p)
+	return p
 
 
 ## Каждый кадр: курсор по тому, что под ним, и подсветка; ночью — светлячки и сильнее затемнение краёв.
@@ -3814,7 +4164,8 @@ func _update_presentation() -> void:
 	var night: float = clampf(_sun_night, 0.0, 1.0)
 	_vignette.set_shader_parameter("strength", lerpf(0.36, 0.55, night))
 	_vignette.set_shader_parameter("tint", Vector3(0.0, 0.0, 0.02).lerp(Vector3(0.0, 0.02, 0.08), night))
-	_fireflies.emitting = night > 0.6 and not _test.has("noflies")
+	_fireflies.emitting = night > 0.6 and not _test.has("noflies") and not sim.storm() and String(terrain.B.get("weather", "")) != "snow"
+	_rain.emitting = sim.storm()
 	_hover_frame += 1
 	if _hover_frame % 3 == 0:
 		_hover = _pick_hover(get_viewport().get_mouse_position())
@@ -3880,6 +4231,8 @@ func _pick_hover(m: Vector2) -> Dictionary:
 		var rel := "neutral" if bp == Sim.NEUTRAL else ("enemy" if sim.enemies(bp, local_player) else ("own_site" if bp == local_player and not sim.buildings[b]["done"] else ("own" if bp == local_player else "ally")))
 		if bp == Sim.NEUTRAL and String(sim.buildings[b]["def"].get("role", "")) in ["shop", "capture", "fountain", "mercenary"]:
 			rel = "neutral"
+		if _can_repair(b):
+			rel = "own_site"      # курсор-молот: можно починить
 		return {"kind": "building", "id": b, "rel": rel}
 	if hit != null:
 		var res := _resource_at(m, ground)
@@ -4108,7 +4461,13 @@ func _update_daylight() -> void:
 	_env.ambient_light_color = Color("#7f8a98").lerp(Color("#66708e"), n)
 	_env.adjustment_saturation = lerpf(0.82, 0.62, n)      # ночью краски приглушённее
 	_env.ambient_light_energy = lerpf(0.42, 0.5, n)
-	_env.background_color = Color("#6f777c").lerp(Color("#1c2230"), n)
+	_env.background_color = Color(String(terrain.B.get("fog", "#6f777c"))).lerp(Color("#1c2230"), n)
+	if sim.blood_moon():      # кровавая луна: ночь с красным отливом
+		_sun.light_color = _sun.light_color.lerp(Color("#ff5a4a"), 0.55)
+		_env.background_color = _env.background_color.lerp(Color("#3a0e0e"), 0.6)
+	if sim.storm():           # гроза: темнее и серее
+		_sun.light_energy *= 0.6
+		_env.background_color = _env.background_color.lerp(Color("#3a4048"), 0.5)
 	_env.fog_light_color = _env.background_color
 	if _clock_label != null:
 		var left := sim.phase_left()
@@ -4314,6 +4673,10 @@ func _smart_order(screen: Vector2, ground: Vector2, with_fight: bool) -> void:
 		elif b_id >= 0 and int(sim.buildings[b_id]["player"]) == local_player and not sim.buildings[b_id]["done"]:
 			_issue({"type": "resume", "player": local_player, "units": workers, "target": b_id})
 			_mark_entity(b_id, Color("#3cff5a"))
+			movers = others
+		elif b_id >= 0 and _can_repair(b_id):      # люди: рабочие чинят повреждённое здание
+			_issue({"type": "repair", "player": local_player, "units": workers, "target": b_id})
+			_mark_entity(b_id, Color("#ffd24a"))
 			movers = others
 		if movers.is_empty():
 			return

@@ -1,7 +1,8 @@
 {
 	"id": "undead",
 	"name": "Нежить",
-	"description": "Мертвецы не знают усталости: очень много здоровья, но мало урона. Святой урон для них особенно опасен.",
+	"description": "Чума: очень много здоровья, но мало урона; святой урон для них особенно опасен. Здания призываются и растут сами — рабочий сразу свободен. Павшие оставляют тела: гули ими кормятся, некроманты поднимают из них скелетов.",
+	"traits": {"summon_build": true},
 	"units": {
 		"worker": {
 			"name": "Упырь-работник", "role": "worker", "level": 1, "undead": true,
@@ -13,10 +14,11 @@
 		},
 		"melee": {
 			"name": "Гуль", "role": "melee", "level": 2, "undead": true,
-			"description": "Быстрый и живучий пожиратель трупов.",
+			"description": "Быстрый пожиратель трупов: раненый, без дела, сам находит тело рядом и пожирает его, залечивая раны.",
 			"cost": {"gold": 120, "wood": 0}, "supply": 2, "build_time": 18,
 			"hp": 560, "damage": 11, "attack_cooldown": 1.0, "range": 0.5, "damage_type": "normal",
 			"armor": 1, "armor_type": "heavy", "speed": 3.5, "radius": 0.45, "mana": 0, "mana_regen": 0,
+			"cannibal": {"heal": 24, "duration": 4.0},
 			"model": {"shape": "humanoid", "scale": 0.95, "bulk": 1.0, "skin": "#7a8a7a", "cloth": "#3a3a34", "pants": "#2a2a24", "weapon": "fists", "head": "bald"},
 			"hotkey": "Q"
 		},
@@ -61,12 +63,12 @@
 		},
 		"necromancer": {
 			"name": "Некромант", "role": "summoner", "level": 3, "undead": true,
-			"description": "В бою сам поднимает скелетов-воинов (до двух сразу).",
+			"description": "В бою сам поднимает скелетов-воинов из тел павших (до трёх сразу). Нет тел — нет скелетов.",
 			"cost": {"gold": 150, "wood": 40}, "supply": 2, "build_time": 26,
 			"hp": 380, "damage": 10, "attack_cooldown": 1.8, "range": 5.5, "damage_type": "magic",
 			"armor": 0, "armor_type": "unarmored", "speed": 3.0, "radius": 0.42, "mana": 0, "mana_regen": 0,
 			"projectile": "magic",
-			"autocast": {"kind": "summon", "unit": "skeleton_warrior", "cooldown": 10, "max": 2, "duration": 40, "range": 8, "color": "#6aff8a"},
+			"autocast": {"kind": "summon", "unit": "skeleton_warrior", "cooldown": 6, "max": 3, "duration": 45, "range": 9, "color": "#6aff8a", "corpse": true},
 			"model": {"shape": "humanoid", "scale": 1.05, "bulk": 0.85, "skin": "#c9d0b8", "cloth": "#1e1a24", "pants": "#141018", "weapon": "staff", "head": "wizard", "robe": true, "orb": "#6aff8a", "skull": true},
 			"hotkey": "R"
 		},

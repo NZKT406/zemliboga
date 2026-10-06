@@ -752,6 +752,23 @@ static func _engine(spec: Dictionary, team: Color) -> Node3D:
 			ammo = pivot(head, Vector3(0, 0.11, 0.25))
 			box(ammo, Vector3(0.04, 0.04, 1.0), Vector3.ZERO, WOOD.lightened(0.15))
 			cyl(ammo, 0.0, 0.07, 0.18, Vector3(0, 0, 0.56), STEEL, 4, Vector3(PI / 2, 0, 0))
+		"wagon":    # повозка разбойников: крытый фургон, сундуки с золотом, фонарь
+			attack = "ram"
+			box(torso, Vector3(0.9, 0.35, 1.45), Vector3(0, 0.25, 0), frame.darkened(0.1))
+			for i in 4:
+				var z := -0.6 + i * 0.4
+				box(torso, Vector3(0.95, 0.06, 0.06), Vector3(0, 0.95, z), DARKWOOD, Vector3.ZERO)
+			ball(torso, 0.62, Vector3(0, 0.55, 0), col(spec, "cover", "#c9b080"), Vector3(0.8, 0.85, 1.25))
+			head = pivot(torso, Vector3(0, 0.45, 0.85))
+			for sx in [-1.0, 1.0]:
+				box(head, Vector3(0.05, 0.05, 0.9), Vector3(float(sx) * 0.25, -0.15, 0.4), WOOD)
+			box(head, Vector3(0.3, 0.25, 0.25), Vector3(-0.15, 0.05, -0.1), Color("#5a3a1a"))
+			box(head, Vector3(0.32, 0.06, 0.27), Vector3(-0.15, 0.2, -0.1), GOLD)
+			for i in 3:
+				ball(torso, 0.08, Vector3(-0.25 + i * 0.12, 0.48, -0.78), GOLD, Vector3.ONE, true)
+			box(torso, Vector3(0.04, 0.5, 0.04), Vector3(0.38, 0.75, 0.68), IRON)
+			ball(torso, 0.08, Vector3(0.38, 1.02, 0.68), Color("#ffcf6a"), Vector3.ONE, true)
+			box(torso, Vector3(0.4, 0.28, 0.02), Vector3(-0.2, 0.75, -0.8), Color("#3a1a1a"))
 		_:      # стенобой: навес и тяжёлое бревно с железной головой
 			attack = "ram"
 			roof(torso, Vector3(1.05, 0.6, 1.6), Vector3(0, 0.62, 0), col(spec, "roof", "#8a6e50"))
@@ -829,7 +846,7 @@ static func building(spec: Dictionary, size: float, team: Color) -> Node3D:
 			_elf_works(root, team)
 		"undead_hall", "undead_crypt", "undead_barracks", "undead_tower", "undead_altar", "undead_forge", "undead_temple", "undead_works":
 			_undead(root, team, String(spec["shape"]))
-		"dwarf_hall", "dwarf_house", "dwarf_barracks", "dwarf_tower", "dwarf_altar", "dwarf_forge", "dwarf_shrine", "dwarf_works":
+		"dwarf_hall", "dwarf_house", "dwarf_barracks", "dwarf_tower", "dwarf_altar", "dwarf_forge", "dwarf_shrine", "dwarf_works", "dwarf_wall":
 			_dwarf(root, team, String(spec["shape"]))
 		"naga_hall", "naga_pool", "naga_barracks", "naga_tower", "naga_altar", "naga_forge", "naga_temple", "naga_works":
 			_naga(root, team, String(spec["shape"]))
@@ -841,6 +858,8 @@ static func building(spec: Dictionary, size: float, team: Color) -> Node3D:
 			_merc_camp(root, team)
 		"lookout":
 			_lookout(root, team)
+		"merchant":
+			_merchant(root)
 		_:
 			box(root, Vector3(size * 0.8, 1.0, size * 0.8), Vector3(0, 0.5, 0), STONE)
 			_flag(root, Vector3(0, 1.0, 0), team, 1.0)
@@ -1494,6 +1513,14 @@ static func _dwarf(root: Node3D, team: Color, kind: String) -> void:
 				box(root, Vector3(0.45, 0.9, 0.04), Vector3(float(sx) * 1.1, 1.2, 1.32), team)
 				ball(root, 0.22, Vector3(float(sx) * 1.6, 0.6, 1.6), DSTONE.lightened(0.1), Vector3(1, 1.4, 1))
 			box(root, Vector3(0.5, 0.08, 0.04), Vector3(0, 1.62, 1.36), RUNE, Vector3.ZERO, true)
+		"dwarf_wall":       # кусок стены: тёсаные блоки и зубцы
+			box(root, Vector3(1.0, 1.2, 1.0), Vector3(0, 0.6, 0), DSTONE)
+			box(root, Vector3(1.04, 0.08, 1.04), Vector3(0, 0.35, 0), DSTONE.darkened(0.2))
+			box(root, Vector3(1.04, 0.08, 1.04), Vector3(0, 0.8, 0), DSTONE.darkened(0.2))
+			for sx in [-1.0, 1.0]:
+				for sz in [-1.0, 1.0]:
+					box(root, Vector3(0.3, 0.3, 0.3), Vector3(float(sx) * 0.33, 1.35, float(sz) * 0.33), DSTONE.lightened(0.06))
+			box(root, Vector3(0.25, 0.2, 0.02), Vector3(0, 0.95, 0.51), team)
 		"dwarf_house":      # дом гнома: приземистый, с дерновой крышей и круглой дверью
 			cyl(root, 0.75, 0.8, 0.7, Vector3(0, 0.35, 0), DSTONE, 8)
 			ball(root, 0.82, Vector3(0, 0.7, 0), Color("#6a7a3a"), Vector3(1, 0.6, 1))
@@ -1784,6 +1811,25 @@ static func _fountain(root: Node3D) -> void:
 		ball(root, 0.06, Vector3(sin(a) * 0.35, 1.0, cos(a) * 0.35), Color("#9fffd0"), Vector3(1, 2.0, 1), true)
 
 
+## Бродячий торговец: пёстрый шатёр, повозка с сундуками, фонари на шестах.
+static func _merchant(root: Node3D) -> void:
+	var cloth := [Color("#b03a6a"), Color("#e8c23a"), Color("#3a7ab0"), Color("#e8c23a")]
+	cyl(root, 1.15, 1.2, 0.08, Vector3(0, 0.04, 0), Color("#8a6a4a"), 10)
+	for i in 8:
+		var a := float(i) * TAU / 8.0
+		cyl(root, 0.0, 0.62, 1.6, Vector3(sin(a) * 0.35, 1.2, cos(a) * 0.35), cloth[i % 4], 3, Vector3(cos(a) * 0.35, 0, -sin(a) * 0.35))
+	cyl(root, 0.95, 1.05, 0.9, Vector3(0, 0.45, 0), Color("#d8c8a0"), 8)
+	box(root, Vector3(0.6, 0.7, 0.05), Vector3(0, 0.35, 1.0), Color("#1c1410"))
+	box(root, Vector3(0.05, 2.6, 0.05), Vector3(0, 1.3, 0), DARKWOOD)
+	box(root, Vector3(0.4, 0.3, 0.02), Vector3(0.2, 2.45, 0), Color("#e8c23a"))
+	for sx in [-1.0, 1.0]:
+		box(root, Vector3(0.05, 1.5, 0.05), Vector3(float(sx) * 1.25, 0.75, 1.1), DARKWOOD)
+		ball(root, 0.1, Vector3(float(sx) * 1.25, 1.55, 1.1), Color("#ffcf6a"), Vector3.ONE, true)
+	box(root, Vector3(0.4, 0.3, 0.3), Vector3(1.0, 0.15, -0.9), Color("#5a3a1a"))
+	box(root, Vector3(0.42, 0.06, 0.32), Vector3(1.0, 0.32, -0.9), GOLD)
+	ball(root, 0.14, Vector3(-0.95, 0.15, -0.95), Color("#8a5aff"), Vector3.ONE, true)
+
+
 ## Сторожевая башня: каменное основание, деревянные опоры, площадка с крышей,
 ## сигнальная жаровня и знамя хозяина (серое, пока башня ничья).
 static func _lookout(root: Node3D, team: Color) -> void:
@@ -1831,13 +1877,14 @@ static func _merc_camp(root: Node3D, team: Color) -> void:
 ## (детали + их цвета в вершинах), и дерево рисуется одним вызовом вместо пяти-шести.
 static var _tree_meshes: Dictionary = {}
 static var _vc_material: StandardMaterial3D
+static var foliage := ""          # окраска листвы по местности: "", "autumn", "winter", "steppe"
 
 
 static func tree(seed_value: int) -> Node3D:
-	var key := ("leaf%d" % (seed_value % 4)) if seed_value % 3 == 0 else ("pine%d" % (seed_value % 3))
+	var key := (("leaf%d" % (seed_value % 4)) if seed_value % 3 == 0 else ("pine%d" % (seed_value % 3))) + foliage
 	if not _tree_meshes.has(key):
 		var parts := _tree_parts(seed_value)
-		_tree_meshes[key] = bake(parts)
+		_tree_meshes[key] = restyle(bake(parts), foliage, seed_value)
 		parts.free()
 	if _vc_material == null:
 		_vc_material = StandardMaterial3D.new()
@@ -1851,6 +1898,30 @@ static func tree(seed_value: int) -> Node3D:
 	root.scale = Vector3.ONE * (0.85 + float(seed_value % 5) * 0.09)
 	root.rotation.y = float(seed_value % 7)
 	return root
+
+
+## Перекрашивает зелень готовой сетки под местность: осенью — в рыжий и багряный,
+## зимой — снег на кронах, в степи — выгоревшая олива. Кора и камни не меняются.
+static func restyle(mesh: ArrayMesh, style: String, salt: int = 0) -> ArrayMesh:
+	if style == "" or mesh.get_surface_count() == 0:
+		return mesh
+	var arrays := mesh.surface_get_arrays(0)
+	var colors: PackedColorArray = arrays[Mesh.ARRAY_COLOR]
+	var autumn: Color = [Color("#c8682a"), Color("#d89a2a"), Color("#a83a22"), Color("#e0b83a")][salt % 4]
+	for i in colors.size():
+		var c := colors[i]
+		if c.g > c.r * 1.08 and c.g > c.b:      # зелень
+			match style:
+				"autumn":
+					colors[i] = autumn.darkened(0.25 - c.v * 0.25)
+				"winter":
+					colors[i] = c.lerp(Color("#e8f0f6"), 0.72)
+				"steppe":
+					colors[i] = c.lerp(Color("#8a8a4a"), 0.55)
+	arrays[Mesh.ARRAY_COLOR] = colors
+	var out := ArrayMesh.new()
+	out.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return out
 
 
 ## Сливает все детали модели (простые фигуры) в одну сетку; цвет детали уходит в цвет вершин.

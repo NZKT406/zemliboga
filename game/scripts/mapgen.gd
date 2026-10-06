@@ -9,25 +9,28 @@ const Sim = preload("res://scripts/sim.gd")
 const Terrain = preload("res://scripts/terrain.gd")
 const SIZES := {96: "Маленькая", 192: "Большая (×4)", 272: "Огромная (×8)"}
 const MAX_PLAYERS_ON := {96: 4, 192: 8, 272: 8}     # на маленькой карте больше 4 баз не помещается
+const OWN_MINES := {96: 2, 192: 3, 272: 4}          # своих рудников у каждого игрока (вместе с рудником у базы)
 
 
 ## race_list — расы игроков по порядку (2…8). Возвращает {"sim": ..., "terrain": ...}.
 ## Если между базами нет прохода, пробует следующее зерно.
-static func generate(race_list: Array, neutral: Dictionary, combat: Dictionary, map_seed: int, map_size: int = 96) -> Dictionary:
+static func generate(race_list: Array, neutral: Dictionary, combat: Dictionary, map_seed: int, map_size: int = 96, biome_key: String = "any") -> Dictionary:
 	var n := race_list.size()
 	var sim: Sim
 	var terrain: Terrain
+	var biome := Terrain.biome_for(biome_key, map_seed)      # местность не меняется от повторных попыток
 	for attempt in 40:
 		var s := map_seed + attempt * 7919
-		terrain = Terrain.new(s, map_size, n)
+		terrain = Terrain.new(s, map_size, n, biome)
 		sim = Sim.new()
 		sim.set_map_size(map_size)
 		sim.seed_value = s
+		sim.biome = biome
 		sim.combat = combat
 		for x in map_size:
 			for y in map_size:
 				if terrain.blocked(Vector2i(x, y)):
-					sim.block_cell(Vector2i(x, y))
+					sim.block_cell(Vector2i(x, y), terrain.swimmable(Vector2i(x, y)))
 		var ok := true
 		for i in n:
 			ok = ok and sim.can_place(8, Vector2i(terrain.bases[i]) - Vector2i(4, 4))
@@ -98,10 +101,17 @@ static func _fill(sim: Sim, terrain: Terrain, race_list: Array, neutral: Diction
 				cnt += 1
 
 	# --- рудники на карте ---
-	if k > 1.5:     # на больших картах у каждой базы есть второй, «свой» рудник
-		for m in _ring(sim, rng, terrain, spots, 5, 20.0, 30.0, 6.0):
+	# «свои» рудники у каждого игрока: всего 2 на маленькой карте, 3 на большой, 4 на огромной
+	# (один у базы и остальные дальше — под новую ратушу; чем дальше, тем сильнее охрана)
+	var own: int = int(OWN_MINES.get(sim.map_size, 2)) - 1
+	for i in own:
+		var dmin := 17.0 + 8.0 * i * sqrt(k)
+		var placed: Array = _ring(sim, rng, terrain, spots, 7, dmin, dmin + 12.0 * sqrt(k), 8.0, true)
+		if placed.is_empty():
+			placed = _ring(sim, rng, terrain, spots, 5, dmin - 3.0, dmin + 22.0 * sqrt(k), 6.0, true)
+		for m in placed:
 			_place_mine(sim, m)
-			mines.append([m, 2])
+			mines.append([m, mini(5, 2 + i)])
 			keep.append([m, 6.0])
 	for i in groups:
 		for m in _ring(sim, rng, terrain, spots, 5, 26.0, 999.0, 14.0):
@@ -226,7 +236,7 @@ static func _fill(sim: Sim, terrain: Terrain, race_list: Array, neutral: Diction
 			keep.append([p, 5.0])
 
 	# --- леса ---
-	for patch in int(30 * k * k):
+	for patch in int(30 * k * k * float(terrain.B["forest"])):      # в степи леса мало, осенью — больше
 		var c := Vector2(rng.randf_range(3, sim.map_size - 3), rng.randf_range(3, sim.map_size - 3))
 		_forest(sim, rng, c, rng.randi_range(10, 28), rng.randf_range(2.0, 3.6), keep)
 
@@ -242,11 +252,15 @@ static func _near_base(terrain: Terrain, p: Vector2) -> float:
 ## (для двух игроков — отражение через центр). Так у всех игроков всё одинаково.
 ## size — сколько клеток должно быть свободно; dmin/dmax — расстояние от ближайшей базы;
 ## sep — отступ от уже занятых мест и друг от друга.
-static func _ring(sim: Sim, rng: RandomNumberGenerator, terrain: Terrain, spots: Array, size: int, dmin: float, dmax: float, sep: float) -> Array:
+static func _ring(sim: Sim, rng: RandomNumberGenerator, terrain: Terrain, spots: Array, size: int, dmin: float, dmax: float, sep: float, near_base := false, clear := true) -> Array:
 	var center: Vector2 = terrain.CENTER
 	var n: int = terrain.bases.size()
-	for attempt in 300:
+	for attempt in (500 if near_base else 400):
 		var p := Vector2(rng.randf_range(8, sim.map_size - 8), rng.randf_range(8, sim.map_size - 8))
+		if near_base:      # ищем вокруг первой базы — копии для остальных получаются поворотом
+			p = (terrain.bases[0] as Vector2) + Vector2(rng.randf_range(dmin, dmax), 0).rotated(rng.randf() * TAU)
+			if p.x < 8.0 or p.y < 8.0 or p.x > sim.map_size - 8.0 or p.y > sim.map_size - 8.0:
+				continue
 		var d := _near_base(terrain, p)
 		if d < dmin or d > dmax or p.distance_to(center) < terrain.vol_out + 5.0:
 			continue
@@ -256,7 +270,10 @@ static func _ring(sim: Sim, rng: RandomNumberGenerator, terrain: Terrain, spots:
 		var ok := true
 		for a in copies.size():
 			var q: Vector2 = copies[a]
-			ok = ok and sim.can_place(size, Vector2i(q) - Vector2i(size / 2, size / 2))
+			if clear:      # под рудники и строения кусты и камни можно расчистить, а воду, скалы и лес — нет
+				ok = ok and _free_except_props(sim, terrain, q, size)
+			else:
+				ok = ok and sim.can_place(size, Vector2i(q) - Vector2i(size / 2, size / 2))
 			for b in range(a + 1, copies.size()):
 				ok = ok and q.distance_to(copies[b]) > sep * 2.0
 			for s in spots:
@@ -266,9 +283,37 @@ static func _ring(sim: Sim, rng: RandomNumberGenerator, terrain: Terrain, spots:
 			if not ok:
 				break
 		if ok:
+			if clear:
+				for q in copies:
+					_clear_props(sim, terrain, q, size)
 			spots.append_array(copies)
 			return copies
 	return []
+
+
+static func _free_except_props(sim: Sim, terrain: Terrain, q: Vector2, size: int) -> bool:
+	var c0 := Vector2i(q) - Vector2i(size / 2, size / 2)
+	for x in size:
+		for y in size:
+			var c := c0 + Vector2i(x, y)
+			if not sim.in_map(c) or (sim.is_blocked(c) and not terrain.prop_cells.has(c)):
+				return false
+	return true
+
+
+## Убирает кусты и камни с участка (и из картинки, и из правил).
+static func _clear_props(sim: Sim, terrain: Terrain, q: Vector2, size: int) -> void:
+	var c0 := Vector2i(q) - Vector2i(size / 2, size / 2)
+	var gone: Dictionary = {}
+	for x in size:
+		for y in size:
+			var c := c0 + Vector2i(x, y)
+			if terrain.prop_cells.has(c):
+				terrain.prop_cells.erase(c)
+				gone[c] = true
+				sim._set_solid(Rect2i(c, Vector2i.ONE), false)
+	if not gone.is_empty():
+		terrain.props = terrain.props.filter(func(pr) -> bool: return not gone.has(Vector2i(floori(pr["pos"].x), floori(pr["pos"].y))))
 
 
 static func _place_mine(sim: Sim, p: Vector2) -> bool:

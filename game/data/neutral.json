@@ -452,6 +452,14 @@
 			"thorns": 0.15,
 			"model": {"shape": "spider", "scale": 1.15, "color": "#c0582a"}
 		},
+		"caravan_wagon": {
+			"name": "Повозка с добычей", "role": "neutral", "level": 4, "supply": 0,
+			"description": "Разбойники везут награбленное. Разбейте повозку — золото и артефакт ваши.",
+			"hp": 1300, "damage": 0, "attack_cooldown": 1.0, "range": 0.0, "damage_type": "normal",
+			"armor": 4, "armor_type": "heavy", "speed": 2.2, "radius": 0.8, "mana": 0, "mana_regen": 0, "bounty": 220,
+			"caravan": true,
+			"model": {"shape": "engine", "engine": "wagon", "scale": 1.15, "wood": "#6a4a2a"}
+		},
 		"ward": {
 			"name": "Глаз-наблюдатель", "role": "ward", "level": 1, "supply": 0,
 			"description": "Стоит на месте и даёт обзор вокруг. Враги могут его разбить.",
@@ -643,6 +651,23 @@
 				"tome",
 				"ward"
 			]
+		},
+		"merchant": {
+			"name": "Бродячий торговец",
+			"role": "shop",
+			"hotkey": "",
+			"cost": {"gold": 0, "wood": 0},
+			"build_time": 1,
+			"hp": 5000,
+			"armor": 20,
+			"armor_type": "fortified",
+			"size": 3,
+			"mana": 0,
+			"mana_regen": 0,
+			"invulnerable": true,
+			"description": "Заглянул ненадолго: продаёт артефакты, которых нет в обычных лавках. Через 2,5 минуты уедет.",
+			"model": {"shape": "merchant"},
+			"sells": ["dragon_blade", "aegis", "phoenix_feather", "shadow_mantle", "mithril_mail", "storm_ring", "queen_fang", "archmage_orb"]
 		},
 		"lookout": {
 			"name": "Сторожевая башня",

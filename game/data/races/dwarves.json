@@ -1,7 +1,8 @@
 {
 	"id": "dwarves",
 	"name": "Гномы",
-	"description": "Горный народ: крепкая броня, порох и рунная магия. Медленные, но стойкие; их рудокопы приносят больше золота, а пушки бьют по площади.",
+	"description": "Твердыня: крепкая броня, порох и рунная магия. Боец, простоявший на месте 2 секунды, окапывается (+3 брони, +15% урона). Рудокопы приносят больше золота, а из камня можно класть стены.",
+	"unit_traits": {"entrench": true},
 	"units": {
 		"worker": {
 			"name": "Гном-рудокоп", "role": "worker", "level": 1,
@@ -178,6 +179,8 @@
 		"altar": {"name": "Зал предков", "role": "altar", "hotkey": "F", "cost": {"gold": 180, "wood": 50}, "build_time": 45, "hp": 1000, "armor": 6, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "dwarf_altar"}, "trains": ["mountain_thane", "runesmith", "powder_master", "gatekeeper"]},
 		"forge": {"name": "Рунная кузня", "role": "forge", "hotkey": "G", "cost": {"gold": 140, "wood": 60}, "build_time": 40, "hp": 1000, "armor": 6, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "dwarf_forge"}, "researches": ["weapons", "armor"]},
 		"temple": {"name": "Святилище рун", "role": "temple", "hotkey": "V", "cost": {"gold": 175, "wood": 80}, "build_time": 45, "hp": 1100, "armor": 6, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "dwarf_shrine"}, "trains": ["rune_priest", "flamer", "drummer"]},
+		"wall": {"name": "Каменная стена", "role": "wall", "hotkey": "N", "cost": {"gold": 10, "wood": 15}, "build_time": 6, "hp": 520, "armor": 8, "armor_type": "fortified", "size": 1, "mana": 0, "mana_regen": 0, "model": {"shape": "dwarf_wall"},
+			"description": "Кусок крепостной стены 1×1: перекрывает проходы. Ставьте рядами, оставляя ворота для своих."},
 		"workshop": {"name": "Паровая мастерская", "role": "workshop", "hotkey": "B", "cost": {"gold": 190, "wood": 140}, "build_time": 50, "hp": 1200, "armor": 6, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "dwarf_works"}, "trains": ["mortar"]}
 	},
 	"start": {

@@ -1,7 +1,8 @@
 {
 	"id": "ogres",
 	"name": "Огры",
-	"description": "Мало дорогих, сильных и живучих юнитов. Мощный ближний бой.",
+	"description": "Орда: мало дорогих, сильных и живучих юнитов. Каждый удар разжигает ярость (бьют всё чаще и сильнее), а добитый враг возвращает огру силы. Кузницы нет — оружие и доспехи куют прямо в логове.",
+	"unit_traits": {"rage": true, "feast": true},
 	"units": {
 		"worker": {
 			"name": "Огр-работяга",
@@ -625,7 +626,9 @@
 				"worker"
 			],
 			"researches": [
-				"tier"
+				"tier",
+				"weapons",
+				"armor"
 			]
 		},
 		"altar": {
@@ -647,29 +650,6 @@
 				"shape": "ogre_totem"
 			},
 			"trains": ["chieftain", "shaman", "beastmaster", "blademaster"]
-		},
-		"forge": {
-			"name": "Костяная кузня",
-			"role": "forge",
-			"hotkey": "G",
-			"cost": {
-				"gold": 160,
-				"wood": 70
-			},
-			"build_time": 40,
-			"hp": 900,
-			"armor": 5,
-			"armor_type": "fortified",
-			"size": 3,
-			"mana": 0,
-			"mana_regen": 0,
-			"model": {
-				"shape": "ogre_forge"
-			},
-			"researches": [
-				"weapons",
-				"armor"
-			]
 		},
 		"temple": {
 			"name": "Хижина знахаря",
@@ -760,7 +740,7 @@
 	"upgrades": {
 		"weapons": {
 			"name": "Оружие",
-			"hotkey": "Q",
+			"hotkey": "R",
 			"icon": "blade",
 			"color": "#c9ced6",
 			"max": 3,
@@ -776,7 +756,7 @@
 		},
 		"armor": {
 			"name": "Доспехи",
-			"hotkey": "E",
+			"hotkey": "T",
 			"icon": "shield",
 			"color": "#8a7a5c",
 			"max": 3,

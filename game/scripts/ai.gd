@@ -149,6 +149,8 @@ func _economy() -> void:
 	var wood: Array = []
 	var idle: Array = []
 	for id in _workers:
+		if sim._has_buff(sim.units[id], "militia"):
+			continue      # ополченцы сейчас воюют
 		var o: Dictionary = sim.units[id]["order"]
 		var kind := String(o.get("type", "idle"))
 		if kind == "gather" or kind == "return":
@@ -156,8 +158,9 @@ func _economy() -> void:
 				gold.append(id)
 			else:
 				wood.append(id)
-		elif kind != "build":
+		elif kind != "build" and kind != "repair":
 			idle.append(id)
+	_repair_base(idle)
 	var p: Dictionary = sim.players[me]
 	var need_wood: bool = int(p["wood"]) < 160
 	var need_gold: bool = int(p["gold"]) < 160
@@ -185,6 +188,39 @@ func _economy() -> void:
 		_cmd({"type": "train", "building": hall["id"], "unit": "worker"})
 
 
+## Готовые здания, где исследуют оружие и доспехи.
+func _research_buildings() -> Array:
+	var out: Array = []
+	for key in _built:
+		for bid in _built[key]["done"]:
+			for r in sim.buildings[bid]["def"].get("researches", []):
+				if String(r) != "tier" and not out.has(bid):
+					out.append(bid)
+	out.sort()
+	return out
+
+
+## Люди: свободный рабочий чинит самое повреждённое здание базы.
+func _repair_base(idle: Array) -> void:
+	if idle.is_empty() or not sim.race_trait(me, "repair") or int(sim.players[me]["gold"]) < 60:
+		return
+	var worst := -1
+	var ratio := 0.7
+	for key in _built:
+		for bid in _built[key]["done"]:
+			var b: Dictionary = sim.buildings[bid]
+			var r: float = float(b["hp"]) / float(b["max_hp"])
+			if r < ratio:
+				ratio = r
+				worst = int(bid)
+	if worst < 0:
+		return
+	for id in idle:
+		if String(sim.units[id]["order"].get("type")) == "repair":
+			return
+	_cmd({"type": "repair", "units": [idle.pop_back()], "target": worst})
+
+
 func _has_supply(def: Dictionary) -> bool:
 	var p: Dictionary = sim.players[me]
 	return int(p["supply_used"]) + int(def.get("supply", 0)) <= int(p["supply_cap"])
@@ -199,6 +235,8 @@ func _construction() -> void:
 	# стройка, оставшаяся без строителя
 	for key in _built:
 		for bid in _built[key]["wip"]:
+			if sim.buildings[bid].get("auto", false):
+				continue      # нежить: здание растёт само, строитель не нужен
 			var tended := false
 			for id in _workers:
 				var o: Dictionary = sim.units[id]["order"]
@@ -304,11 +342,13 @@ func _production() -> void:
 			if (sim.buildings[bid]["queue"] as Array).is_empty() and _afford(sim.upgrade_cost(me, "tier")):
 				_cmd({"type": "research", "building": bid, "upgrade": "tier"})
 				break
-	for bid in _done("forge"):
+	for bid in _research_buildings():      # кузница, а у огров и нагов — логово и казармы
 		var fb: Dictionary = sim.buildings[bid]
 		if not (fb["queue"] as Array).is_empty() or _army.size() < 6:
 			continue
 		for key in fb["def"].get("researches", []):
+			if String(key) == "tier":
+				continue
 			var up: Dictionary = p["data"]["upgrades"][key]
 			if int(p["upgrades"].get(key, 0)) < int(up.get("max", 3)) and not p["research_wip"].has(key) and _afford(sim.upgrade_cost(me, String(key))):
 				_cmd({"type": "research", "building": bid, "upgrade": key})
@@ -354,7 +394,7 @@ func _foes_near(pos: Vector2, radius: float) -> Array:
 	var out: Array = []
 	for id in sim.units:
 		var u: Dictionary = sim.units[id]
-		if not sim.enemies(int(u["player"]), me):      # свои и союзники — не враги
+		if not sim.enemies(int(u["player"]), me) or u.get("hidden", false):      # свои, союзники и укрывшиеся эльфы
 			continue
 		if int(u["player"]) == Sim.NEUTRAL and String(u["order"].get("type")) != "attack":
 			continue
@@ -415,6 +455,11 @@ func _military() -> void:
 	var rally := _base + to_center * 9.0
 	# оборона базы важнее всего
 	var threat := _foes_near(_base, 17.0)
+	if threat.size() >= 3 and threat.size() > _army.size() and _base != Vector2.ZERO:      # люди: по тревоге — ополчение
+		for hid in _done("hall"):
+			for act in sim.buildings[hid]["def"].get("actions", []):
+				if String(act["key"]) == "militia" and sim.tick >= int(sim.buildings[hid].get("cds", {}).get("militia", 0)):
+					_cmd({"type": "action", "building": hid, "action": "militia"})
 	if not threat.is_empty() and _base != Vector2.ZERO:
 		var where: Vector2 = sim.units[threat[0]]["pos"]
 		var defenders: Array = []

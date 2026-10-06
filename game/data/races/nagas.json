@@ -1,7 +1,8 @@
 {
 	"id": "nagas",
 	"name": "Наги",
-	"description": "Змеиный народ из морских глубин: быстрые и гибкие. Их атаки несут холод глубин — враги замедляются и бьют реже.",
+	"description": "Глубины: быстрые и гибкие змеи. Бойцы плавают — ходят по рекам и озёрам, где другим не пройти, и в воде залечивают раны. Атаки несут холод глубин — враг замедляется. Кузницы нет: улучшения куют в казармах.",
+	"unit_traits": {"amphibious": true},
 	"units": {
 		"worker": {
 			"name": "Наг-прислужник", "role": "worker", "level": 1,
@@ -182,11 +183,10 @@
 	},
 	"buildings": {
 		"supply": {"name": "Коралловый садок", "role": "supply", "hotkey": "Q", "cost": {"gold": 80, "wood": 25}, "build_time": 24, "hp": 600, "armor": 5, "armor_type": "fortified", "size": 2, "mana": 0, "mana_regen": 0, "model": {"shape": "naga_pool"}, "supply_given": 8},
-		"barracks": {"name": "Казармы прилива", "role": "barracks", "hotkey": "E", "cost": {"gold": 160, "wood": 60}, "build_time": 44, "hp": 1250, "armor": 5, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "naga_barracks"}, "trains": ["melee", "ranged", "heavy"]},
+		"barracks": {"name": "Казармы прилива", "role": "barracks", "hotkey": "E", "cost": {"gold": 160, "wood": 60}, "build_time": 44, "hp": 1250, "armor": 5, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "naga_barracks"}, "trains": ["melee", "ranged", "heavy"], "researches": ["weapons", "armor"]},
 		"tower": {"name": "Коралловый шпиль", "role": "tower", "hotkey": "R", "cost": {"gold": 115, "wood": 85}, "build_time": 40, "hp": 600, "armor": 5, "armor_type": "fortified", "size": 2, "mana": 0, "mana_regen": 0, "model": {"shape": "naga_tower"}, "damage": 19, "attack_cooldown": 1.1, "range": 8.0, "damage_type": "magic"},
 		"hall": {"name": "Дворец прилива", "role": "hall", "hotkey": "T", "cost": {"gold": 385, "wood": 205}, "build_time": 90, "hp": 1650, "armor": 5, "armor_type": "fortified", "size": 4, "mana": 0, "mana_regen": 0, "model": {"shape": "naga_hall"}, "supply_given": 15, "trains": ["worker"], "researches": ["tier"]},
 		"altar": {"name": "Алтарь глубин", "role": "altar", "hotkey": "F", "cost": {"gold": 180, "wood": 50}, "build_time": 45, "hp": 950, "armor": 5, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "naga_altar"}, "trains": ["sea_witch", "tide_lord", "siren_queen", "serpent_blade"]},
-		"forge": {"name": "Кузня прилива", "role": "forge", "hotkey": "G", "cost": {"gold": 140, "wood": 60}, "build_time": 40, "hp": 950, "armor": 5, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "naga_forge"}, "researches": ["weapons", "armor"]},
 		"temple": {"name": "Святилище сирен", "role": "temple", "hotkey": "V", "cost": {"gold": 175, "wood": 80}, "build_time": 45, "hp": 1050, "armor": 5, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "naga_temple"}, "trains": ["siren", "spitter", "tidecaller"]},
 		"workshop": {"name": "Гарпунная верфь", "role": "workshop", "hotkey": "B", "cost": {"gold": 185, "wood": 140}, "build_time": 48, "hp": 1100, "armor": 5, "armor_type": "fortified", "size": 3, "mana": 0, "mana_regen": 0, "model": {"shape": "naga_works"}, "trains": ["harpoon"]}
 	},
@@ -197,8 +197,8 @@
 		}
 	},
 	"upgrades": {
-		"weapons": {"name": "Коралловые клинки", "hotkey": "Q", "icon": "blade", "color": "#ff7a8a", "max": 3, "cost": {"gold": 150, "wood": 75}, "time": 40, "mods": {"damage_mul": 1.1}, "description": "Все ваши юниты наносят на 10% больше урона за каждый уровень."},
-		"armor": {"name": "Чешуйчатая броня", "hotkey": "E", "icon": "shield", "color": "#3aa8a0", "max": 3, "cost": {"gold": 150, "wood": 100}, "time": 40, "mods": {"armor_add": 1}, "description": "Все ваши юниты получают +1 брони за каждый уровень."},
+		"weapons": {"name": "Коралловые клинки", "hotkey": "T", "icon": "blade", "color": "#ff7a8a", "max": 3, "cost": {"gold": 150, "wood": 75}, "time": 40, "mods": {"damage_mul": 1.1}, "description": "Все ваши юниты наносят на 10% больше урона за каждый уровень."},
+		"armor": {"name": "Чешуйчатая броня", "hotkey": "F", "icon": "shield", "color": "#3aa8a0", "max": 3, "cost": {"gold": 150, "wood": 100}, "time": 40, "mods": {"armor_add": 1}, "description": "Все ваши юниты получают +1 брони за каждый уровень."},
 		"tier": {"name": "Сердце океана", "hotkey": "E", "icon": "star", "color": "#3aa8d0", "max": 1, "cost": {"gold": 320, "wood": 210}, "time": 70, "mods": {}, "hall_hp": 500, "description": "Второй уровень главного здания. Открывает «Королевского стража», «Гарпунную баллисту» и найм второго героя, главное здание получает +500 прочности."}
 	}
 }

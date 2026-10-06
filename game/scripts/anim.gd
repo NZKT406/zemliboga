@@ -86,6 +86,32 @@ static func animate(v: Dictionary, moving: bool, speed: float, working: bool, de
 			body_rx = sin(ph * 3.0) * 0.015 * w
 			torso_rx = 0.0
 
+	# особые позы рас (их выставляет графика по состоянию юнита)
+	var head_ry := 0.0
+	var pose := String(v.get("pose", ""))
+	match pose:
+		"eat":         # гуль склонился над телом и рвёт его
+			var bite := sin(time * 9.0 + ph)
+			torso_rx = 0.75 + bite * 0.18
+			head_rx = 0.35 + bite * 0.15
+			al = -1.0 + bite * 0.35
+			ar = -1.0 - bite * 0.35
+			body_y -= 0.08 * s
+		"entrench":    # гном окопался: присел, щит вперёд
+			body_y -= 0.1 * s
+			torso_rx += 0.15
+			al = -1.25
+			if kind == "humanoid" and legs.size() >= 2:
+				legs[0].rotation.x = 0.75
+				legs[1].rotation.x = -0.45
+		"swim":        # наг плывёт: гребёт руками, корпус наклонён
+			torso_rx += 0.12
+			al = sin(time * 3.2 + ph) * 0.7 - 0.5
+			ar = -sin(time * 3.2 + ph) * 0.7 - 0.5
+	if pose == "" and kind == "humanoid" and w < 0.05 and not working and float(v["atk_t"]) < 0.0:
+		# стоит без дела: время от времени оглядывается
+		head_ry = sin(time * 0.5 + ph * 1.7) * 0.45 * smoothstep(0.55, 1.0, sin(time * 0.21 + ph) * 0.5 + 0.5)
+
 	# работа: рубит или строит
 	if working and arm_r != null:
 		var chop := sin(time * 9.0 + ph)
@@ -151,11 +177,20 @@ static func animate(v: Dictionary, moving: bool, speed: float, working: bool, de
 		if ammo != null:
 			(ammo as Node3D).visible = t < 0.5 or t >= 1.0
 
+	# вздрагивает от пропущенного удара
+	if float(v.get("flinch", 0.0)) > 0.0:
+		v["flinch"] = maxf(0.0, float(v["flinch"]) - delta)
+		var f: float = float(v["flinch"]) / 0.22
+		torso_rx -= 0.32 * f
+		body_z -= 0.07 * f * s
+		head_rx -= 0.2 * f
+
 	body.position = Vector3(0, body_y, body_z)
 	body.rotation.x = body_rx
 	torso.rotation.x = torso_rx
 	torso.rotation.y = torso_ry
 	head.rotation.x = head_rx
+	head.rotation.y = head_ry
 	if arm_l != null:
 		arm_l.rotation.x = al
 		arm_r.rotation.x = ar
@@ -164,6 +199,8 @@ static func animate(v: Dictionary, moving: bool, speed: float, working: bool, de
 ## Смерть: юнит падает, лежит и уходит в землю. Возвращает true, когда модель пора убрать.
 static func die(c: Dictionary, delta: float) -> bool:
 	c["t"] = float(c["t"]) + delta
+	if c.get("keep", false) and float(c["t"]) > 2.0:
+		c["t"] = 2.0      # тело ещё лежит (его могут съесть или поднять) — не уходит в землю
 	var t: float = c["t"]
 	var node: Node3D = c["node"]
 	var body: Node3D = c["parts"]["body"]

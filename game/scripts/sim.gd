@@ -33,6 +33,7 @@ const XP_RADIUS := 12.0     # герой получает опыт за враг
 const STAT_KEYS := ["damage", "attack_cooldown", "range", "armor", "speed"]
 
 var map_size: int = MAP_SIZE
+var biome := "meadow"             # местность карты (луга, степь, осень, зима, озёра, нагорье)
 var tick: int = 0
 var seed_value: int = 0
 var units: Dictionary = {}        # id -> состояние юнита
@@ -48,7 +49,10 @@ var game_over := false
 var _next_id: int = 1
 var _pending: Array = []
 var _grid := AStarGrid2D.new()
+var _swim := AStarGrid2D.new()    # та же карта для пловцов (наги): вода для них проходима
+var _water: Dictionary = {}       # клетки с водой (непроходимы для всех, кроме пловцов)
 var _side := PackedInt32Array()   # сторона каждого игрока: у союзников одно и то же число
+var corpses: Dictionary = {}      # id -> {id, pos, expires}: тела павших (ими кормятся гули, их поднимают некроманты)
 
 
 func _init() -> void:
@@ -89,11 +93,12 @@ func allies(a: int, b: int) -> bool:
 ## Задаёт сторону карты (96, 192 или 272). Вызывается до разметки непроходимых клеток.
 func set_map_size(n: int) -> void:
 	map_size = n
-	_grid.region = Rect2i(0, 0, n, n)
-	_grid.cell_size = Vector2.ONE
-	_grid.offset = Vector2(0.5, 0.5)
-	_grid.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_ONLY_IF_NO_OBSTACLES
-	_grid.update()
+	for g in [_grid, _swim]:
+		g.region = Rect2i(0, 0, n, n)
+		g.cell_size = Vector2.ONE
+		g.offset = Vector2(0.5, 0.5)
+		g.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_ONLY_IF_NO_OBSTACLES
+		g.update()
 
 
 # ---------- создание мира ----------
@@ -106,8 +111,13 @@ func add_player(player: int, race: Dictionary) -> void:
 	}
 
 
-func block_cell(cell: Vector2i) -> void:
+## water — клетка непроходима только из-за воды: пловцы (наги) по ней ходят.
+func block_cell(cell: Vector2i, water := false) -> void:
 	_grid.set_point_solid(cell, true)
+	if water:
+		_water[cell] = true
+	else:
+		_swim.set_point_solid(cell, true)
 
 
 func _set_solid(rect: Rect2i, solid: bool) -> void:
@@ -115,6 +125,206 @@ func _set_solid(rect: Rect2i, solid: bool) -> void:
 		for y in range(rect.position.y, rect.end.y):
 			if in_map(Vector2i(x, y)):
 				_grid.set_point_solid(Vector2i(x, y), solid)
+				_swim.set_point_solid(Vector2i(x, y), solid)
+
+
+func in_water(p: Vector2) -> bool:
+	return _water.has(to_cell(p))
+
+
+## ---------- особенности рас ----------
+## Свойство юнита берётся из его таблицы (def) или из общих свойств расы (unit_traits —
+## у всех бойцов расы, кроме рабочих). Так у каждой расы свои механики.
+
+func has_trait(u: Dictionary, key: String) -> bool:
+	if u["def"].has(key):
+		return true
+	if is_worker(u) or not players.has(u["player"]):
+		return false
+	return (players[u["player"]]["data"].get("unit_traits", {}) as Dictionary).has(key)
+
+
+func race_trait(player: int, key: String) -> bool:
+	return players.has(player) and (players[player]["data"].get("traits", {}) as Dictionary).has(key)
+
+
+func swims(u: Dictionary) -> bool:
+	return has_trait(u, "amphibious")
+
+
+const WATER_REGEN := 5.0          # наги: здоровья в секунду, пока в воде
+const FEAST_HEAL := 0.12          # огры: доля здоровья, которую возвращает добивание
+const RAGE_MAX := 5               # огры: сколько раз копится ярость
+const ENTRENCH_TICKS := 20        # гномы: через сколько тиков на месте боец окапывается
+const ENTRENCH_MODS := {"armor_add": 3.0, "damage_mul": 1.15}
+const CORPSE_TIME := 450          # тела лежат 45 секунд
+const MILITIA_RADIUS := 14.0
+const MILITIA_MODS := {"damage_add": 12.0, "armor_add": 3.0, "speed_mul": 1.1}
+
+
+func _has_buff(u: Dictionary, key: String) -> bool:
+	for b in u["buffs"]:
+		if String(b["key"]) == key and tick < int(b["until"]):
+			return true
+	return false
+
+
+## Ярость огров: каждый удар — ещё одна ступень (до RAGE_MAX), и удары чаще и сильнее.
+## Без новых ударов 4 секунды ярость спадает.
+func _add_rage(u: Dictionary) -> void:
+	var n := mini(RAGE_MAX, int(u.get("rage", 0)) + 1) if _has_buff(u, "rage") else 1
+	u["rage"] = n
+	_add_buff(u, "rage", 4.0, {"cooldown_mul": pow(0.93, n), "damage_mul": 1.0 + 0.04 * n})
+
+
+## Человеческое ополчение кончилось: рабочие возвращаются к прежнему делу.
+func _end_militia(u: Dictionary) -> void:
+	var o: Dictionary = u["pre_militia"]
+	u.erase("pre_militia")
+	var kind := String(o.get("type", "idle"))
+	if kind in ["gather", "return"] and resources.has(int(o.get("target", -1))):
+		var r: Dictionary = resources[int(o["target"])]
+		_start_gather(u, int(r["id"]), String(r["kind"]), r["pos"])
+	elif String(u["order"].get("type")) != "attack":
+		_idle(u)
+
+
+## {"type": "action", "player": 0, "building": id, "action": "militia"} — особые действия зданий.
+func _cmd_action(cmd: Dictionary) -> void:
+	var player := int(cmd["player"])
+	var b = buildings.get(cmd.get("building"))
+	var key := String(cmd.get("action", ""))
+	if b == null or int(b["player"]) != player or not b["done"]:
+		return
+	var act: Dictionary = {}
+	for a in b["def"].get("actions", []):
+		if String(a["key"]) == key:
+			act = a
+	if act.is_empty():
+		return
+	var cds: Dictionary = b.get("cds", {}) if b.get("cds") is Dictionary else {}
+	if tick < int(cds.get(key, 0)):
+		_msg(player, "%s ещё не готово: %d с" % [act["name"], ceili((int(cds[key]) - tick) * TICK_DT)])
+		return
+	cds[key] = tick + int(float(act.get("cooldown", 60)) * TICK_RATE)
+	b["cds"] = cds
+	match key:
+		"militia":      # рабочие у ратуши берут оружие
+			var n := 0
+			for id in _units_near(b["pos"], MILITIA_RADIUS):
+				var w: Dictionary = units[id]
+				if int(w["player"]) != player or not is_worker(w):
+					continue
+				if not w.has("pre_militia"):
+					w["pre_militia"] = (w["order"] as Dictionary).duplicate()
+				_add_buff(w, "militia", float(act.get("duration", 45)), MILITIA_MODS)
+				w["carry"] = 0
+				_idle(w)
+				n += 1
+			events.append({"type": "blast", "pos": b["pos"], "radius": MILITIA_RADIUS, "color": "#ff9a3a"})
+			events.append({"type": "horn", "player": player, "pos": b["pos"]})
+			_msg(player, "К оружию! Рабочих в ополчении: %d (на %d с)" % [n, int(act.get("duration", 45))])
+
+
+## Тела павших. Гули (нежить) подкрепляются ими, некроманты поднимают из них скелетов.
+func _add_corpse(t: Dictionary) -> void:
+	if int(t["expires"]) >= 0 or String(t["def"].get("role", "")) in ["ward", "summon"]:
+		return
+	corpses[t["id"]] = {"id": t["id"], "pos": t["pos"], "expires": tick + CORPSE_TIME}
+
+
+func _remove_corpse(id: int, how: String) -> void:
+	if corpses.has(id):
+		events.append({"type": "corpse_removed", "id": id, "how": how, "pos": corpses[id]["pos"]})
+		corpses.erase(id)
+
+
+func nearest_corpse(pos: Vector2, max_dist: float) -> int:
+	var best := -1
+	var best_d := max_dist
+	var ids: Array = corpses.keys()
+	ids.sort()
+	for id in ids:
+		var d: float = pos.distance_to(corpses[id]["pos"])
+		if d < best_d:
+			best_d = d
+			best = int(id)
+	return best
+
+
+## Раненый гуль без дела ищет тело неподалёку, чтобы подкрепиться.
+func _seek_corpse(u: Dictionary) -> void:
+	if (tick + int(u["id"])) % 5 != 0 or float(u["hp"]) > float(u["max_hp"]) * 0.85:
+		return
+	var c := nearest_corpse(u["pos"], 7.0)
+	if c < 0:
+		return
+	u["order"] = {"type": "eat", "target": c, "left": int(float(u["def"]["cannibal"].get("duration", 4.0)) * TICK_RATE)}
+	_path_to(u, corpses[c]["pos"])
+
+
+func _do_eat(u: Dictionary, o: Dictionary) -> void:
+	var c = corpses.get(int(o["target"]))
+	if c == null or _nearest_enemy(u["pos"], int(u["player"]), 5.0, false) >= 0:
+		_idle(u)      # тело исчезло или рядом враг — не до еды
+		return
+	if (u["pos"] as Vector2).distance_to(c["pos"]) > float(u["radius"]) + 0.7:
+		if not is_moving(u):
+			_path_to(u, c["pos"])
+		return
+	_stop_path(u)
+	u["busy"] = true
+	u["facing"] = ((c["pos"] as Vector2) - (u["pos"] as Vector2)).normalized() if (c["pos"] as Vector2).distance_to(u["pos"]) > 0.05 else u["facing"]
+	u["hp"] = minf(float(u["max_hp"]), float(u["hp"]) + float(u["def"]["cannibal"].get("heal", 20.0)) * TICK_DT)
+	o["left"] = int(o["left"]) - 1
+	if int(o["left"]) <= 0 or float(u["hp"]) >= float(u["max_hp"]):
+		_remove_corpse(int(o["target"]), "eaten")
+		_idle(u)
+
+
+## {"type": "repair", "player": 0, "units": [рабочие], "target": id здания} — только у рас с ремонтом (люди).
+func _cmd_repair(cmd: Dictionary) -> void:
+	var player := int(cmd["player"])
+	var b = buildings.get(cmd.get("target"))
+	if b == null or not race_trait(player, "repair") or enemies(int(b["player"]), player) or int(b["player"]) == NEUTRAL or not b["done"]:
+		return
+	for id in _owned(cmd, true):
+		units[id]["order"] = {"type": "repair", "target": int(b["id"])}
+		units[id]["wait"] = 0
+		_go_adjacent(units[id], _rect(b))
+
+
+## Ремонт: прочность восстанавливается чуть медленнее стройки; полный ремонт стоит треть цены здания.
+func _do_repair(u: Dictionary, o: Dictionary) -> void:
+	var b = buildings.get(o["target"])
+	if b == null or float(b["hp"]) >= float(b["max_hp"]):
+		_idle(u)
+		return
+	if not _near(u, _rect(b)):
+		_repath(u, _rect(b))
+		return
+	_stop_path(u)
+	u["busy"] = true
+	u["facing"] = ((b["pos"] as Vector2) - (u["pos"] as Vector2)).normalized()
+	var bt := maxf(5.0, float(b["def"].get("build_time", 30)))
+	var heal := float(b["max_hp"]) / (bt * 1.3) * TICK_DT
+	var price := float(b["def"].get("cost", {}).get("gold", 0)) * 0.33 * heal / float(b["max_hp"])
+	u["repair_debt"] = float(u.get("repair_debt", 0.0)) + price
+	if float(u["repair_debt"]) >= 1.0:
+		var pay := int(u["repair_debt"])
+		if int(players[u["player"]]["gold"]) < pay:
+			_msg(int(u["player"]), "Не хватает золота на ремонт")
+			_idle(u)
+			return
+		players[u["player"]]["gold"] -= pay
+		u["repair_debt"] = float(u["repair_debt"]) - pay
+	b["hp"] = minf(float(b["max_hp"]), float(b["hp"]) + heal)
+	if (tick + int(u["id"])) % 6 == 0:
+		events.append({"type": "repair_spark", "id": b["id"], "pos": u["pos"]})
+
+
+func _grid_for(swim: bool) -> AStarGrid2D:
+	return _swim if swim else _grid
 
 
 func add_resource(kind: String, cell: Vector2i, size: int = 1) -> int:
@@ -153,7 +363,8 @@ func spawn_building(player: int, key: String, def: Dictionary, cell: Vector2i, d
 ## менять у отдельного юнита (улучшения, ауры, предметы), не трогая таблицу.
 func spawn_unit(player: int, key: String, def: Dictionary, pos: Vector2, count_supply: bool = true) -> int:
 	var id := _new_id()
-	var p := cell_center(nearest_free_cell(to_cell(pos)))
+	var swim := (race_trait(player, "amphibious") or (players.has(player) and (players[player]["data"].get("unit_traits", {}) as Dictionary).has("amphibious"))) and String(def.get("role", "")) != "worker"
+	var p := cell_center(nearest_free_cell(to_cell(pos), {}, swim))
 	var u := {
 		"id": id, "is_building": false, "player": player, "key": key, "def": def,
 		"pos": p, "prev_pos": p, "facing": Vector2(0, 1),
@@ -262,6 +473,10 @@ func _execute(cmd: Dictionary) -> void:
 				rb["rally_target"] = int(cmd.get("target", -1))
 		"gift":       # передать союзнику золото и дерево: {"to": игрок, "gold": n, "wood": n}
 			_cmd_gift(cmd)
+		"repair":     # люди: рабочие чинят повреждённое здание
+			_cmd_repair(cmd)
+		"action":     # особое действие здания (ополчение у людей)
+			_cmd_action(cmd)
 		"follow":     # идти следом за своим юнитом
 			var leader = units.get(cmd.get("target"))
 			if leader != null and not enemies(int(leader["player"]), int(cmd["player"])):
@@ -353,8 +568,8 @@ func _cmd_move(cmd: Dictionary, kind: String) -> void:
 		var off: Vector2 = slots[ids[i]] if ids.size() > 1 else Vector2.ZERO
 		var dest := (target + off).clamp(Vector2(0.5, 0.5), Vector2(map_size - 0.5, map_size - 0.5))
 		var dest_cell := to_cell(dest)
-		if _grid.is_point_solid(dest_cell) or taken.has(dest_cell):
-			dest_cell = nearest_free_cell(dest_cell, taken)
+		if _grid_for(swims(u)).is_point_solid(dest_cell) or taken.has(dest_cell):
+			dest_cell = nearest_free_cell(dest_cell, taken, swims(u))
 			dest = cell_center(dest_cell)
 		taken[dest_cell] = true
 		u["order"] = {"type": kind, "dest": dest}
@@ -396,6 +611,9 @@ func _cmd_build(cmd: Dictionary) -> void:
 	var size: int = int(def.get("size", 2))
 	if not can_place(size, cell):
 		_msg(player, "Здесь строить нельзя")
+		return
+	if String(def.get("role", "")) == "hall" and not hall_spot_ok(cell, size):
+		_msg(player, "Главное здание нельзя ставить вплотную к руднику: нужен отступ %d клетки" % HALL_MINE_GAP)
 		return
 	if not can_afford(player, def.get("cost", {})):
 		_msg(player, "Не хватает ресурсов")
@@ -479,6 +697,25 @@ func can_place(size: int, cell: Vector2i) -> bool:
 	return true
 
 
+const HALL_MINE_GAP := 4      # сколько клеток должно быть между главным зданием и рудником
+
+
+## Главное здание стоит не ближе HALL_MINE_GAP клеток к любому руднику —
+## иначе рабочие носили бы золото «из рук в руки» и выбирали рудник за пару минут.
+func hall_spot_ok(cell: Vector2i, size: int) -> bool:
+	var a := Rect2i(cell, Vector2i(size, size))
+	for id in resources:
+		var r: Dictionary = resources[id]
+		if String(r["kind"]) != "gold":
+			continue
+		var b := _rect(r)
+		var dx := maxi(0, maxi(a.position.x - b.end.x, b.position.x - a.end.x))
+		var dy := maxi(0, maxi(a.position.y - b.end.y, b.position.y - a.end.y))
+		if maxi(dx, dy) < HALL_MINE_GAP:
+			return false
+	return true
+
+
 func can_afford(player: int, cost: Dictionary) -> bool:
 	return int(players[player]["gold"]) >= int(cost.get("gold", 0)) and int(players[player]["wood"]) >= int(cost.get("wood", 0))
 
@@ -528,6 +765,16 @@ func step() -> void:
 			_update_building(buildings[id])
 	_respawn_camps()
 	_update_runes()
+	_update_caravans()
+	_update_world_events()
+	if tick % 10 == 0 and not corpses.is_empty():      # тела истлевают
+		var gone: Array = []
+		for cid in corpses:
+			if tick >= int(corpses[cid]["expires"]):
+				gone.append(int(cid))
+		gone.sort()
+		for cid in gone:
+			_remove_corpse(cid, "rot")
 
 
 func _move_unit(u: Dictionary) -> void:
@@ -545,7 +792,7 @@ func _move_unit(u: Dictionary) -> void:
 			if i + 1 >= path.size():
 				break
 			var nxt: Vector2 = path[i + 1]
-			if pos.distance_squared_to(nxt) > 64.0 or not _clear_line(pos, nxt, clampf(float(u["radius"]), 0.2, 0.42)):
+			if pos.distance_squared_to(nxt) > 64.0 or not _clear_line(pos, nxt, clampf(float(u["radius"]), 0.2, 0.42), swims(u)):
 				break
 			i += 1
 	while budget > 0.0 and i < path.size():
@@ -628,7 +875,7 @@ func _try_shift(u: Dictionary, shift: Vector2) -> void:
 		return   # работающих, бьющих и неподвижных (глаз-наблюдатель) не толкаем
 	var p: Vector2 = u["pos"] + shift
 	var c := to_cell(p)
-	if in_map(c) and not _grid.is_point_solid(c):
+	if in_map(c) and not _grid_for(swims(u)).is_point_solid(c):
 		u["pos"] = p
 
 
@@ -663,7 +910,7 @@ func _check_stuck(u: Dictionary) -> void:
 	var side := Vector2(-to.y, to.x) * (1.0 if tries % 2 == 1 else -1.0)
 	for s in [1.0, -1.0]:
 		var wp: Vector2 = pos + side * s * (float(u["radius"]) * 2.0 + 0.7) + to * 0.5
-		if not is_blocked(to_cell(wp)) and _clear_line(pos, wp, 0.2):
+		if not is_blocked(to_cell(wp), swims(u)) and _clear_line(pos, wp, 0.2, swims(u)):
 			path.insert(i, wp)
 			u["path"] = path
 			return
@@ -684,7 +931,19 @@ func _think(u: Dictionary) -> void:
 	if int(u["expires"]) >= 0 and tick >= int(u["expires"]):
 		_kill(u, NEUTRAL)       # время призванного существа вышло
 		return
+	# сколько тиков юнит стоит на месте (для «окопа» гномов и укрытия эльфов)
+	if (u["pos"] as Vector2).distance_squared_to(u["prev_pos"]) < 0.0004 and float(u["swing"]) < 0.0:
+		u["still"] = int(u.get("still", 0)) + 1
+	else:
+		u["still"] = 0
+	# эльфы ночью: кто стоит без дела 2 с, не бьёт и не ранен, становится невидим для врагов
+	u["hidden"] = has_trait(u, "shadowmeld") and is_night() and int(u["still"]) >= 20 \
+		and tick - int(u.get("fought", -999)) > 30 and String(u["order"].get("type", "idle")) in ["idle", "move", "home"]
+	if u.has("pre_militia") and not _has_buff(u, "militia"):
+		_end_militia(u)
 	_refresh_stats(u)
+	if swims(u) and in_water(u["pos"]):      # наги в воде залечивают раны
+		u["hp"] = minf(float(u["max_hp"]), float(u["hp"]) + WATER_REGEN * TICK_DT)
 	if float(u["max_mana"]) > 0.0:
 		u["mana"] = minf(float(u["max_mana"]), float(u["mana"]) + float(u["mana_regen"]) * TICK_DT)
 	if float(u["hp_regen"]) > 0.0:
@@ -706,7 +965,8 @@ func _think(u: Dictionary) -> void:
 	var o: Dictionary = u["order"]
 	match String(o.get("type", "idle")):
 		"idle":
-			_auto_acquire(u, o)
+			if not _auto_acquire(u, o) and has_trait(u, "cannibal"):
+				_seek_corpse(u)
 		"amove":
 			if not _auto_acquire(u, o) and not is_moving(u):
 				_idle(u)
@@ -729,6 +989,10 @@ func _think(u: Dictionary) -> void:
 			_do_cast(u, o)
 		"pickup":
 			_do_pickup(u, o)
+		"repair":
+			_do_repair(u, o)
+		"eat":
+			_do_eat(u, o)
 		"follow":
 			var leader = units.get(o["target"])
 			if leader == null:
@@ -796,8 +1060,14 @@ func _autocast_summon(u: Dictionary, ac: Dictionary) -> void:
 	var def: Dictionary = players[player]["data"].get("summons", {}).get(key, players[NEUTRAL]["data"]["units"].get(key, {}))
 	if def.is_empty():
 		return
-	u["cds"]["auto"] = tick + int(float(ac.get("cooldown", 12.0)) * TICK_RATE)
 	var spot: Vector2 = (u["pos"] as Vector2) + (u["facing"] as Vector2).rotated(0.9 * (1 if alive.size() % 2 == 0 else -1)) * 1.4
+	if ac.get("corpse", false):      # нежить поднимает скелетов только из тел павших
+		var c := nearest_corpse(u["pos"], float(ac.get("range", 9.0)))
+		if c < 0:
+			return
+		spot = corpses[c]["pos"]
+		_remove_corpse(c, "raised")
+	u["cds"]["auto"] = tick + int(float(ac.get("cooldown", 12.0)) * TICK_RATE)
 	var id := spawn_unit(player, key, def, spot, false)
 	units[id]["expires"] = tick + int(float(ac.get("duration", 40.0)) * TICK_RATE)
 	units[id]["camp"] = -1
@@ -834,13 +1104,15 @@ func gap(u: Dictionary, t: Dictionary) -> float:
 ## Войска сами нападают на врагов рядом. Рабочие и нейтралы — нет.
 ## Спокойных нейтралов никто сам не трогает.
 func _auto_acquire(u: Dictionary, o: Dictionary) -> bool:
-	if int(u["player"]) == NEUTRAL:
+	if int(u["player"]) == NEUTRAL and not u.get("raider", false):      # набег (raider) ведёт себя как войско
 		if (u["pos"] as Vector2).distance_to(u["home"]) > 1.5 and not is_moving(u):
 			u["order"] = {"type": "home"}
 			_path_to(u, u["home"])
 		return false
-	if is_worker(u) or float(u["damage"]) <= 0.0 or (tick + int(u["id"])) % 3 != 0:
+	if (is_worker(u) and not _has_buff(u, "militia")) or float(u["damage"]) <= 0.0 or (tick + int(u["id"])) % 3 != 0:
 		return false
+	if u.get("hidden", false):
+		return false      # укрывшийся эльф сам не нападает — сидит в засаде, ждёт приказа
 	var best := _nearest_enemy(u["pos"], int(u["player"]), ACQUIRE, true)
 	if best < 0:
 		return false
@@ -855,8 +1127,8 @@ func _nearest_enemy(pos: Vector2, player: int, max_dist: float, with_buildings: 
 		if not units.has(id):
 			continue
 		var t: Dictionary = units[id]
-		if not enemies(int(t["player"]), player):
-			continue
+		if not enemies(int(t["player"]), player) or t.get("hidden", false):
+			continue      # союзников и укрывшихся в ночи эльфов не трогаем
 		if int(t["player"]) == NEUTRAL and String(t["order"].get("type")) != "attack":
 			continue
 		var d: float = pos.distance_to(t["pos"])
@@ -882,7 +1154,7 @@ func _order_attack(u: Dictionary, target: int, resume: Dictionary) -> void:
 
 func _do_attack(u: Dictionary, o: Dictionary) -> void:
 	var t = entity(int(o["target"]))
-	var neutral := int(u["player"]) == NEUTRAL
+	var neutral: bool = int(u["player"]) == NEUTRAL and not u.get("raider", false)
 	if t == null or (neutral and (u["pos"] as Vector2).distance_to(u["home"]) > LEASH):
 		var resume: Dictionary = o.get("resume", {})
 		if neutral:
@@ -904,6 +1176,7 @@ func _do_attack(u: Dictionary, o: Dictionary) -> void:
 			var windup: float = minf(0.45, cooldown * 0.35)
 			u["cd"] = cooldown
 			u["swing"] = windup
+			u["fought"] = tick
 			u["swing_target"] = int(t["id"])
 			u["busy"] = true
 			events.append({"type": "attack", "id": u["id"], "windup": windup})
@@ -1026,6 +1299,9 @@ func _damage(t: Dictionary, amount: float, dtype: String, attacker: int, attacke
 	var hp_before := float(t["hp"])
 	t["hp"] = float(t["hp"]) - dealt
 	t["last_hit_by"] = attacker
+	t["fought"] = tick
+	if attack and src != null and not src["is_building"] and has_trait(src, "rage"):
+		_add_rage(src)      # огры: каждый удар разжигает ярость
 	if t["def"].get("boss", false) and attacker_player != NEUTRAL and players.has(attacker_player):
 		var by: Dictionary = t.get("dmg_by", {})      # кто сколько урона нанёс боссу (добивание — не больше оставшегося здоровья)
 		by[attacker_player] = float(by.get(attacker_player, 0.0)) + minf(dealt, maxf(0.0, hp_before))
@@ -1048,7 +1324,7 @@ func _damage(t: Dictionary, amount: float, dtype: String, attacker: int, attacke
 	if int(t["player"]) == NEUTRAL:
 		for id in units:
 			var mate: Dictionary = units[id]
-			if int(mate["player"]) == NEUTRAL and int(mate["camp"]) == int(t["camp"]) and String(mate["order"].get("type")) != "attack":
+			if int(mate["player"]) == NEUTRAL and int(mate["camp"]) == int(t["camp"]) and String(mate["order"].get("type")) != "attack" and float(mate["damage"]) > 0.0:
 				_order_attack(mate, attacker, {})
 	elif not is_worker(t) and float(t["damage"]) > 0.0:
 		var kind := String(t["order"].get("type"))
@@ -1094,6 +1370,13 @@ func _kill(t: Dictionary, killer_player: int) -> void:
 		_msg(owner, "%s пал. Его можно воскресить там, где он был нанят" % String(t["def"]["name"]))
 	units.erase(t["id"])
 	events.append({"type": "death", "id": t["id"]})
+	_add_corpse(t)
+	var killer = entity(int(t.get("last_hit_by", -1)))
+	if killer != null and not killer["is_building"] and int(killer["player"]) != owner and has_trait(killer, "feast"):
+		var gain := float(killer["max_hp"]) * FEAST_HEAL      # огры: добивание возвращает силы
+		killer["hp"] = minf(float(killer["max_hp"]), float(killer["hp"]) + gain)
+		events.append({"type": "float", "player": killer["player"], "pos": killer["pos"], "text": "+%d" % int(gain), "color": "#ff7a5a"})
+		events.append({"type": "feast", "id": killer["id"]})
 	_award_xp(t, killer_player)
 	if t["def"].has("split"):      # слизень делится на маленьких
 		var sp: Dictionary = t["def"]["split"]
@@ -1108,6 +1391,8 @@ func _kill(t: Dictionary, killer_player: int) -> void:
 				_order_attack(units[kid], int(t["last_hit_by"]), {})
 	if t["def"].get("boss", false):
 		_boss_slain(t)
+	if t.has("caravan"):
+		_caravan_looted(t, killer_player)
 	if owner == NEUTRAL and int(t["camp"]) >= 0 and killer_player != NEUTRAL and players.has(killer_player):
 		var left := false
 		for id in units:
@@ -1117,9 +1402,10 @@ func _kill(t: Dictionary, killer_player: int) -> void:
 		if not left:
 			_camp_cleared(int(t.get("camp_level", t["def"].get("level", 1))), t["pos"], killer_player, int(t["camp"]))
 	if int(t["bounty"]) > 0 and killer_player != NEUTRAL and players.has(killer_player):
-		players[killer_player]["gold"] += int(t["bounty"])
-		players[killer_player]["stats"]["gold"] += int(t["bounty"])
-		events.append({"type": "bounty", "player": killer_player, "amount": int(t["bounty"]), "pos": t["pos"]})
+		var bounty := int(t["bounty"]) * (3 if owner == NEUTRAL and blood_moon() else 2) / 2      # кровавая луна: награда ×1,5
+		players[killer_player]["gold"] += bounty
+		players[killer_player]["stats"]["gold"] += bounty
+		events.append({"type": "bounty", "player": killer_player, "amount": bounty, "pos": t["pos"]})
 
 
 ## Босс повержен: игрок, нанёсший ему больше всего урона, получает «Силу дракона»
@@ -1280,6 +1566,263 @@ func _take_rune(u: Dictionary, r: Dictionary) -> void:
 	_msg(player, "%s: %s" % [info["name"], info["text"]])
 
 
+## ---------- караваны разбойников ----------
+## Время от времени по карте проходит караван: повозка с награбленным и охрана.
+## Он идёт по кругу через несколько дальних точек. Разбейте повозку — золото и артефакт ваши.
+## Чем позже, тем богаче и сильнее караваны.
+
+const CARAVAN_FIRST := 1500
+const CARAVAN_EVERY := 2400
+var caravans: Dictionary = {}      # id -> {id, route, leg, wagon, guards, camp, level, power}
+var _next_caravan := 1
+
+
+func _caravan_limit() -> int:
+	return 1 + (1 if map_size >= 192 else 0) + (1 if map_size >= 272 else 0)
+
+
+## Главные здания игроков — от них держатся подальше караваны, метеориты и торговцы.
+func _halls() -> Array:
+	var out: Array = []
+	var ids: Array = buildings.keys()
+	ids.sort()
+	for id in ids:
+		var b: Dictionary = buildings[id]
+		if int(b["player"]) != NEUTRAL and String(b["def"].get("role", "")) == "hall":
+			out.append(b["pos"])
+	return out
+
+
+## Случайное свободное место size×size, не ближе min_base к базам. salt — чтобы места отличались.
+func _random_spot(size: int, min_base: float, salt: int) -> Vector2:
+	var halls := _halls()
+	for attempt in 80:
+		var p := Vector2(8 + _roll(attempt, salt) * (map_size - 16), 8 + _roll(attempt, salt + 1) * (map_size - 16))
+		var cell := to_cell(p) - Vector2i(size / 2, size / 2)
+		if not can_place(size + 2, cell - Vector2i(1, 1)):
+			continue
+		var ok := true
+		for h in halls:
+			ok = ok and p.distance_to(h) >= min_base
+		if ok:
+			return cell_center(to_cell(p))
+	return Vector2(-1, -1)
+
+
+func _spawn_caravan() -> void:
+	var route: Array = []
+	for attempt in 40:
+		if route.size() >= 3:
+			break
+		var p := _random_spot(1, 20.0, 7001 + tick + attempt * 13)
+		if p.x < 0.0:
+			continue
+		var ok := true
+		for q in route:
+			ok = ok and p.distance_to(q) > map_size * 0.28
+		if ok and (route.is_empty() or path_exists(route[0], p)):
+			route.append(p)
+	if route.size() < 2:
+		return
+	var minutes := float(tick) / (60.0 * TICK_RATE)
+	var level := clampi(3 + int(minutes / 6.0), 3, 6)
+	var power := 1.0 + 0.05 * minutes
+	var cid := _next_caravan
+	_next_caravan += 1
+	var camp := 300000 + cid
+	var wagon := spawn_unit(NEUTRAL, "caravan_wagon", _scaled_def("caravan_wagon", power), route[0], false)
+	var crew: Array = [["bandit", 3]]
+	if level >= 4:
+		crew.append(["poacher", 1])
+	if level >= 5:
+		crew.append(["bandit_lord", 1])
+	if level >= 6:
+		crew = [["bandit", 4], ["poacher", 2], ["bandit_lord", 2]]
+	var guards: Array = []
+	for pair in crew:
+		for i in int(pair[1]):
+			var g := spawn_unit(NEUTRAL, String(pair[0]), _scaled_def(String(pair[0]), power), (route[0] as Vector2) + Vector2(1.6, 0).rotated(guards.size() * 1.3), false)
+			guards.append(g)
+	for id in [wagon] + guards:
+		units[id]["camp"] = camp
+		units[id]["camp_level"] = level
+		units[id]["power"] = power
+		units[id]["home"] = units[id]["pos"]
+	units[wagon]["caravan"] = cid
+	caravans[cid] = {"id": cid, "route": route, "leg": 1, "wagon": wagon, "guards": guards, "camp": camp, "level": level, "power": power}
+	events.append({"type": "caravan_spawned", "pos": route[0], "level": level})
+
+
+func _update_caravans() -> void:
+	if tick >= CARAVAN_FIRST and (tick - CARAVAN_FIRST) % CARAVAN_EVERY == 0 and caravans.size() < _caravan_limit():
+		_spawn_caravan()
+	if tick % 5 != 0 or caravans.is_empty():
+		return
+	var cids: Array = caravans.keys()
+	cids.sort()
+	for cid in cids:
+		var c: Dictionary = caravans[cid]
+		if not units.has(int(c["wagon"])):
+			caravans.erase(cid)      # повозку разбили — охрана остаётся простыми разбойниками
+			continue
+		var alive: Array = []
+		var fighting := false
+		for gid in c["guards"]:
+			if units.has(gid):
+				alive.append(gid)
+				fighting = fighting or String(units[gid]["order"].get("type")) == "attack"
+		c["guards"] = alive
+		if fighting:
+			continue      # охрана дерётся — повозка ждёт
+		var w: Dictionary = units[int(c["wagon"])]
+		var route: Array = c["route"]
+		var target: Vector2 = route[int(c["leg"])]
+		if (w["pos"] as Vector2).distance_to(target) < 2.5:
+			c["leg"] = (int(c["leg"]) + 1) % route.size()
+			target = route[int(c["leg"])]
+		if String(w["order"].get("type")) != "move" or not is_moving(w):
+			w["order"] = {"type": "move", "dest": target}
+			_path_to(w, target)
+		w["home"] = w["pos"]
+		var side := Vector2(-(w["facing"] as Vector2).y, (w["facing"] as Vector2).x)
+		for i in alive.size():
+			var g: Dictionary = units[alive[i]]
+			g["home"] = g["pos"]
+			var slot: Vector2 = (w["pos"] as Vector2) - (w["facing"] as Vector2) * (0.6 + 1.1 * (i / 2)) + side * (1.3 if i % 2 == 0 else -1.3)
+			if (g["pos"] as Vector2).distance_to(slot) > 1.6 and (not is_moving(g) or (tick + i) % 20 == 0):
+				g["order"] = {"type": "move", "dest": slot}
+				_path_to(g, slot)
+
+
+## Повозка каравана разбита: золото и гарантированный артефакт.
+func _caravan_looted(t: Dictionary, killer_player: int) -> void:
+	var gold := int(150.0 * float(t.get("power", 1.0)))
+	if players.has(killer_player) and killer_player != NEUTRAL:
+		players[killer_player]["gold"] += gold
+		players[killer_player]["stats"]["gold"] += gold
+		events.append({"type": "float", "player": killer_player, "pos": t["pos"], "text": "Караван! +%d" % gold, "color": "#ffd940"})
+	var pool: Array = players[NEUTRAL]["data"].get("camp_rewards", {}).get("6", {}).get("items", [])
+	if not pool.is_empty():
+		add_loot(String(pool[int(_roll(int(t["id"]), 4242) * pool.size()) % pool.size()]), t["pos"])
+	events.append({"type": "caravan_looted", "player": killer_player, "pos": t["pos"]})
+
+
+## ---------- случайные события мира ----------
+## Раз в несколько минут в мире что-то происходит. Что именно и где — решает зерно партии,
+## поэтому у всех игроков сетевой игры события одинаковые, но каждая партия — своя.
+
+const WEV_FIRST := 2100
+const WEV_EVERY := 2700
+const WORLD_EVENTS := ["meteor", "invasion", "merchant", "gold_rush", "blood_moon", "storm"]
+var world: Dictionary = {"last": "", "gold_rush": 0, "storm": 0, "blood_cycle": -1, "merchant": -1, "merchant_until": 0}
+
+
+func _update_world_events() -> void:
+	if tick >= WEV_FIRST and (tick - WEV_FIRST) % WEV_EVERY == 0:
+		_world_event()
+	if int(world["merchant"]) >= 0 and tick >= int(world["merchant_until"]):
+		var mb = buildings.get(int(world["merchant"]))
+		if mb != null:
+			_set_solid(_rect(mb), false)
+			buildings.erase(mb["id"])
+			events.append({"type": "building_removed", "id": mb["id"]})
+		world["merchant"] = -1
+	if tick < int(world["storm"]) and tick % 35 == 0:      # гроза: молнии бьют в случайные места
+		var p := Vector2(_roll(tick, 515) * map_size, _roll(tick, 616) * map_size)
+		events.append({"type": "lightning", "pos": p})
+		for id in _units_near(p, 1.6):
+			_damage(units[id], 70.0, "magic", -1, NEUTRAL)
+
+
+func _world_event(force: String = "") -> void:
+	var k := String(WORLD_EVENTS[int(_roll(tick, 31337) * WORLD_EVENTS.size()) % WORLD_EVENTS.size()]) if force == "" else force
+	if k == String(world["last"]) and force == "":
+		k = String(WORLD_EVENTS[(WORLD_EVENTS.find(k) + 1) % WORLD_EVENTS.size()])
+	world["last"] = k
+	var minutes := float(tick) / (60.0 * TICK_RATE)
+	var ev := {"type": "world_event", "kind": k, "pos": Vector2(-1, -1), "player": -1}
+	match k:
+		"meteor":      # падает метеорит: взрыв и новое богатое месторождение золота
+			var p := _random_spot(3, 18.0, 9100 + tick)
+			if p.x < 0.0:
+				return
+			for id in _units_near(p, 3.5):
+				_damage(units[id], 200.0, "magic", -1, NEUTRAL)
+			var rid := add_resource("gold", to_cell(p) - Vector2i(1, 1), 3)
+			resources[rid]["amount"] = 2500
+			resources[rid]["meteor"] = true
+			events.append({"type": "resource_added", "id": rid})
+			ev["pos"] = p
+		"invasion":    # орда монстров идёт на базу случайного игрока
+			var alive := active_players()
+			if alive.is_empty():
+				return
+			var victim: int = alive[int(_roll(tick, 4040) * alive.size()) % alive.size()]
+			var hall := Vector2(-1, -1)
+			for id in buildings:
+				if int(buildings[id]["player"]) == victim and String(buildings[id]["def"].get("role", "")) == "hall":
+					hall = buildings[id]["pos"]
+			if hall.x < 0.0:
+				return
+			var from := Vector2(-1, -1)
+			for attempt in 60:
+				var q := hall + Vector2(22.0 + 8.0 * _roll(attempt, 5151 + tick), 0).rotated(_roll(attempt, 5050 + tick) * TAU)
+				var inside := q.x > 3.0 and q.y > 3.0 and q.x < map_size - 3.0 and q.y < map_size - 3.0
+				if inside and not is_blocked(to_cell(q)) and path_exists(q, hall):
+					from = q
+					break
+			if from.x < 0.0:
+				return
+			var level := clampi(2 + int(minutes / 5.0), 2, 6)
+			var options: Array = []
+			for c in players[NEUTRAL]["data"]["camps"]:
+				if int(c["level"]) == level:
+					options.append(c)
+			if options.is_empty():
+				return
+			var camp: Dictionary = options[int(_roll(tick, 6060) * options.size()) % options.size()]
+			var keys: Array = camp["units"].keys()
+			keys.sort()
+			var n := 0
+			for key in keys:
+				for i in int(camp["units"][key]) + 1:
+					var id := spawn_unit(NEUTRAL, String(key), _scaled_def(String(key), 1.0 + 0.05 * minutes), from + Vector2(1.4, 0).rotated(n * 1.1), false)
+					units[id]["camp"] = _next_camp
+					units[id]["camp_level"] = level
+					units[id]["raider"] = true
+					units[id]["home"] = units[id]["pos"]
+					units[id]["order"] = {"type": "amove", "dest": hall}
+					_path_to(units[id], hall)
+					n += 1
+			_next_camp += 1
+			ev["pos"] = from
+			ev["player"] = victim
+		"merchant":    # бродячий торговец с артефактами — 2,5 минуты
+			var p := _random_spot(3, 22.0, 7300 + tick)
+			var def: Dictionary = players[NEUTRAL]["data"]["buildings"].get("merchant", {})
+			if p.x < 0.0 or def.is_empty():
+				return
+			var bid := spawn_building(NEUTRAL, "merchant", def, to_cell(p) - Vector2i(1, 1))
+			world["merchant"] = bid
+			world["merchant_until"] = tick + 1500
+			ev["pos"] = p
+		"gold_rush":   # золотая лихорадка: полторы минуты рудники дают в полтора раза больше
+			world["gold_rush"] = tick + 900
+		"blood_moon":  # кровавая луна: ближайшей ночью нейтралы злее и богаче
+			world["blood_cycle"] = tick / DAY_CYCLE
+		"storm":       # гроза: полторы минуты бьют молнии, видно хуже
+			world["storm"] = tick + 900
+	events.append(ev)
+
+
+func blood_moon() -> bool:
+	return is_night() and int(world.get("blood_cycle", -1)) == tick / DAY_CYCLE
+
+
+func storm() -> bool:
+	return tick < int(world.get("storm", 0))
+
+
 ## ---------- день и ночь ----------
 ## Сутки длятся 6 минут: 4 минуты день, 2 минуты ночь. Ночью обзор юнитов меньше
 ## (кроме эльфов), а нежить восстанавливает здоровье.
@@ -1338,7 +1881,11 @@ func active_players() -> Array:
 
 func _update_building(b: Dictionary) -> void:
 	if not b["done"]:
+		if b.get("auto", false):      # нежить: призванное здание растёт само
+			_advance_build(b)
 		return
+	if b["def"].has("well"):
+		_update_well(b)
 	match String(b["def"].get("role", "")):
 		"capture":
 			_update_capture(b)
@@ -1508,6 +2055,11 @@ func _refresh_stats(u: Dictionary) -> void:
 		_mix(m, item_def(String(ik)).get("mods", {}))
 	if d.get("undead", false) and is_night():
 		m["hp_regen"] = float(m["hp_regen"]) + NIGHT_UNDEAD_REGEN      # нежить крепнет ночью
+	if int(u["player"]) == NEUTRAL and blood_moon():
+		_mix(m, {"damage_mul": 1.3, "speed_mul": 1.1})      # кровавая луна: нейтралы злее
+	u["entrenched"] = has_trait(u, "entrench") and int(u.get("still", 0)) >= ENTRENCH_TICKS and float(u["base"]["speed"]) > 0.0
+	if u["entrenched"]:
+		_mix(m, ENTRENCH_MODS)      # гномы: постоял — окопался
 	if u["hero"] and players[u["player"]].get("dragon_buff", false):
 		_mix(m, DRAGON_MODS)      # «Сила дракона» за победу над боссом
 	var buffs: Array = u["buffs"]
@@ -1920,7 +2472,8 @@ func save_state() -> Dictionary:
 		"tick": tick, "seed": seed_value, "units": units, "buildings": buildings, "resources": resources,
 		"projectiles": projectiles, "players": players, "game_over": game_over, "next_id": _next_id, "pending": _pending,
 		"loot": loot, "map_size": map_size, "neutral_cap": neutral_cap, "next_camp": _next_camp,
-		"runes": runes, "rune_spots": rune_spots,
+		"runes": runes, "rune_spots": rune_spots, "corpses": corpses,
+		"caravans": caravans, "next_caravan": _next_caravan, "world": world, "biome": biome,
 	}
 
 
@@ -1941,6 +2494,11 @@ func load_state(d: Dictionary) -> void:
 	_next_camp = int(d.get("next_camp", 100000))
 	runes = d.get("runes", {})
 	rune_spots = d.get("rune_spots", [])
+	corpses = d.get("corpses", {})
+	caravans = d.get("caravans", {})
+	_next_caravan = int(d.get("next_caravan", 1))
+	world = d.get("world", world)
+	biome = String(d.get("biome", "meadow"))
 	for id in resources:
 		_set_solid(_rect(resources[id]), true)
 	for id in buildings:
@@ -2299,7 +2857,8 @@ func _do_gather(u: Dictionary, o: Dictionary) -> void:
 		return
 	var carry_key := "carry_gold" if String(r["kind"]) == "gold" else "carry_wood"
 	var amount: int = mini(int(u["def"].get(carry_key, 10)), int(r["amount"]))
-	r["amount"] = int(r["amount"]) - amount
+	if not (String(r["kind"]) == "tree" and race_trait(int(u["player"]), "tree_friend")):
+		r["amount"] = int(r["amount"]) - amount      # эльфы берут у леса, не вырубая деревья
 	u["carry"] = amount
 	u["carry_kind"] = "gold" if String(r["kind"]) == "gold" else "wood"
 	if int(r["amount"]) <= 0:
@@ -2315,7 +2874,8 @@ func _do_return(u: Dictionary, o: Dictionary) -> void:
 		return
 	var rect := _rect(buildings[hall])
 	if _near(u, rect):
-		var gained: int = int(round(int(u["carry"]) * float(players[u["player"]].get("income_mul", 1.0))))
+		var rush := 1.5 if String(u["carry_kind"]) == "gold" and tick < int(world.get("gold_rush", 0)) else 1.0      # золотая лихорадка
+		var gained: int = int(round(int(u["carry"]) * float(players[u["player"]].get("income_mul", 1.0)) * rush))
 		players[u["player"]][String(u["carry_kind"])] += gained
 		players[u["player"]]["stats"][String(u["carry_kind"])] += gained
 		u["carry"] = 0
@@ -2332,16 +2892,56 @@ func _do_build(u: Dictionary, o: Dictionary) -> void:
 	if not _near(u, _rect(b)):
 		_repath(u, _rect(b))
 		return
-	u["busy"] = true
 	u["facing"] = ((b["pos"] as Vector2) - (u["pos"] as Vector2)).normalized()
 	_stop_path(u)
-	b["progress"] = minf(1.0, float(b["progress"]) + TICK_DT / maxf(1.0, float(b["def"].get("build_time", 30))))
-	b["hp"] = minf(float(b["max_hp"]), float(b["hp"]) + float(b["max_hp"]) * 0.9 * TICK_DT / maxf(1.0, float(b["def"].get("build_time", 30))))
+	if race_trait(int(b["player"]), "summon_build"):      # нежить: рабочий лишь призывает здание и уходит
+		if not b.get("auto", false):
+			b["auto"] = true
+			events.append({"type": "summon_build", "id": b["id"], "pos": b["pos"]})
+		_idle(u)
+		return
+	u["busy"] = true
+	if _advance_build(b):
+		_idle(u)
+
+
+## Один тик стройки. Возвращает true, когда здание готово.
+func _advance_build(b: Dictionary) -> bool:
+	var bt := maxf(1.0, float(b["def"].get("build_time", 30)))
+	b["progress"] = minf(1.0, float(b["progress"]) + TICK_DT / bt)
+	b["hp"] = minf(float(b["max_hp"]), float(b["hp"]) + float(b["max_hp"]) * 0.9 * TICK_DT / bt)
 	if float(b["progress"]) >= 1.0:
 		b["done"] = true
+		b.erase("auto")
 		players[b["player"]]["supply_cap"] += int(b["def"].get("supply_given", 0))
 		events.append({"type": "building_done", "id": b["id"]})
-		_idle(u)
+		return true
+	return false
+
+
+## Лунный колодец эльфов: копит силу (ночью вдвое быстрее) и тратит её, леча и восполняя ману
+## своим и союзникам рядом.
+func _update_well(b: Dictionary) -> void:
+	var w: Dictionary = b["def"]["well"]
+	if not b.has("energy"):
+		b["energy"] = float(w.get("max", 250))
+	if (tick + int(b["id"])) % TICK_RATE != 0:
+		return
+	b["energy"] = minf(float(w.get("max", 250)), float(b["energy"]) + float(w.get("regen", 1.0)) * (2.0 if is_night() else 1.0))
+	for id in _units_near(b["pos"], float(w.get("radius", 5.0)) + float(b["radius"])):
+		var u: Dictionary = units[id]
+		if enemies(int(u["player"]), int(b["player"])):
+			continue
+		var hp := minf(float(w.get("heal", 10)), float(u["max_hp"]) - float(u["hp"]))
+		var mana := minf(float(w.get("mana", 4)), float(u["max_mana"]) - float(u["mana"]))
+		var cost := hp * 0.5 + mana
+		if cost <= 0.05 or float(b["energy"]) < cost:
+			continue
+		u["hp"] = float(u["hp"]) + hp
+		u["mana"] = float(u["mana"]) + mana
+		b["energy"] = float(b["energy"]) - cost
+		if hp >= 5.0 and (tick / TICK_RATE + int(id)) % 3 == 0:
+			events.append({"type": "beam", "from": b["pos"], "to": u["pos"], "color": "#9fe8ff"})
 
 
 ## Если юнит стоит, но до цели не дошёл (его оттолкнули) — проложить путь заново.
@@ -2394,15 +2994,16 @@ func _go_adjacent(u: Dictionary, rect: Rect2i) -> void:
 
 
 func _path_to(u: Dictionary, dest: Vector2) -> void:
-	var start_cell := nearest_free_cell(to_cell(u["pos"]))
-	var goal := nearest_free_cell(to_cell(dest))
-	var path: PackedVector2Array = _grid.get_point_path(start_cell, goal, true)
+	var swim := swims(u)
+	var start_cell := nearest_free_cell(to_cell(u["pos"]), {}, swim)
+	var goal := nearest_free_cell(to_cell(dest), {}, swim)
+	var path: PackedVector2Array = _grid_for(swim).get_point_path(start_cell, goal, true)
 	# если цель недостижима (за обрывом, на острове), путь ведёт к ближайшей достижимой точке —
 	# и тогда точную точку цели подставлять нельзя: юнит пошёл бы к ней напрямую сквозь скалы
 	var reached := path.size() > 0 and to_cell(path[path.size() - 1]) == goal
 	if path.size() > 0:
 		path.remove_at(0)            # первая точка — клетка, где юнит уже стоит
-	if reached and not is_blocked(to_cell(dest)):
+	if reached and not is_blocked(to_cell(dest), swim):
 		if path.size() > 0:
 			path[path.size() - 1] = dest # последняя точка — точное место
 		else:
@@ -2413,7 +3014,8 @@ func _path_to(u: Dictionary, dest: Vector2) -> void:
 
 
 ## Свободна ли прямая между точками для юнита (проверяются клетки вдоль линии и по её бокам).
-func _clear_line(a: Vector2, b: Vector2, r: float) -> bool:
+func _clear_line(a: Vector2, b: Vector2, r: float, swim := false) -> bool:
+	var g := _grid_for(swim)
 	var d := b - a
 	var length := d.length()
 	if length < 0.01:
@@ -2422,7 +3024,7 @@ func _clear_line(a: Vector2, b: Vector2, r: float) -> bool:
 	var side := Vector2(-d.y, d.x) / length * r
 	for k in range(1, n + 1):
 		var p := a + d * (float(k) / n)
-		if _grid.is_point_solid(to_cell(p)) or _grid.is_point_solid(to_cell(p + side)) or _grid.is_point_solid(to_cell(p - side)):
+		if g.is_point_solid(to_cell(p)) or g.is_point_solid(to_cell(p + side)) or g.is_point_solid(to_cell(p - side)):
 			return false
 	return true
 
@@ -2478,12 +3080,12 @@ func cell_center(c: Vector2i) -> Vector2:
 	return Vector2(c) + Vector2(0.5, 0.5)
 
 
-func is_blocked(c: Vector2i) -> bool:
-	return not in_map(c) or _grid.is_point_solid(c)
+func is_blocked(c: Vector2i, swim := false) -> bool:
+	return not in_map(c) or _grid_for(swim).is_point_solid(c)
 
 
-func nearest_free_cell(c: Vector2i, taken: Dictionary = {}) -> Vector2i:
-	if not is_blocked(c) and not taken.has(c):
+func nearest_free_cell(c: Vector2i, taken: Dictionary = {}, swim := false) -> Vector2i:
+	if not is_blocked(c, swim) and not taken.has(c):
 		return c
 	for r in range(1, map_size):
 		var best := Vector2i(-1, -1)

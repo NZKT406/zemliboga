@@ -87,7 +87,7 @@ func update(sim, me: int, delta: float, force := false) -> void:
 		return
 	_timer = UPDATE_EVERY
 	light = explored.duplicate()
-	var night: bool = sim.is_night()
+	var night: bool = sim.is_night() or sim.storm()      # в грозу видно хуже, как ночью
 	for id in sim.units:
 		var u: Dictionary = sim.units[id]
 		var p := int(u["player"])
