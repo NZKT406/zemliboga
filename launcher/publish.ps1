@@ -104,6 +104,12 @@ try {
 		$newTree = Invoke-GitHub POST "$api/git/trees" @{ base_tree = $base; tree = $entries.ToArray() } $token
 		$newCommit = Invoke-GitHub POST "$api/git/commits" @{ message = $msg; tree = $newTree.sha; parents = @($head) } $token
 		Invoke-GitHub PATCH "$api/git/refs/heads/$($cfg.branch)" @{ sha = $newCommit.sha } $token | Out-Null
+		# эта папка теперь совпадает с опубликованной версией: лаунчер считает её файлы своими,
+		# а всё, что изменится здесь позже, при обновлении не затрёт
+		$mine = @{}
+		foreach ($rel in $local.Keys) { $mine[$rel] = Get-BlobSha $local[$rel] $rel }
+		Save-HashCache
+		Write-Json $ManifestPath @{ commit = $newCommit.sha; files = $mine }
 		Write-Host ''
 		Write-Host "Готово: опубликовано (изменено файлов: $changed, удалено: $removed)." -ForegroundColor Green
 		Write-Host 'Друзья получат обновление при следующем запуске LAUNCHER.bat.'

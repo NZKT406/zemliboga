@@ -1,4 +1,4 @@
-﻿extends RefCounted
+extends RefCounted
 ## Генератор случайной карты: базы, рудники, леса, лагеря нейтралов, нейтральные строения,
 ## вулкан с драконом в центре. Всё определяется зерном (одно число), поэтому карту можно повторить.
 ## Карта бывает трёх размеров: 96 (маленькая), 192 (×4 по площади) и 272 (×8),
@@ -10,6 +10,8 @@ const Terrain = preload("res://scripts/terrain.gd")
 const SIZES := {96: "Маленькая", 192: "Большая (×4)", 272: "Огромная (×8)"}
 const MAX_PLAYERS_ON := {96: 4, 192: 8, 272: 8}     # на маленькой карте больше 4 баз не помещается
 const OWN_MINES := {96: 2, 192: 3, 272: 4}          # своих рудников у каждого игрока (вместе с рудником у базы)
+static var walls_on := true                         # кольца леса вокруг баз (выключает только проверка)
+const EXTRA_GOLD := 20000                           # золота в рудниках вдали от баз (у базы — Sim.GOLD_IN_MINE)
 
 
 ## race_list — расы игроков по порядку (2…8). Возвращает {"sim": ..., "terrain": ...}.
@@ -69,6 +71,16 @@ static func _fill(sim: Sim, terrain: Terrain, race_list: Array, neutral: Diction
 		keep.append([terrain.plateau_corner + terrain.fall_dir * (terrain.plateau_r + 3.0), 6.0])
 
 	# --- базы ---
+	# Каждая база — поляна в кольце густого леса с двумя выходами: к центру карты и вбок.
+	# Ратуша стоит в глубине поляны, рудник — ближе к выходу. Так напасть можно только
+	# через выходы (пока лес не вырублен), и понятно, откуда ждать врага.
+	# Форма кольца и угол бокового выхода у всех игроков одинаковые — всё честно.
+	var wall_r := 14.0 + 2.5 * (k - 1.0)
+	var side_exit := (1.0 if rng.randf() < 0.5 else -1.0) * rng.randf_range(1.5, 2.0)
+	var wall_phase := rng.randf() * TAU
+	var exits: Array = [0.0, side_exit]
+	var hard_keep: Array = keep.duplicate()      # что нельзя засадить и стеной (броды, подъёмы, вулкан)
+	var corridors: Array = []      # точки у выходов: туда не ставим строения и лес
 	for player in n:
 		var base: Vector2 = terrain.bases[player]
 		var to_center := (center - base).normalized()
@@ -77,23 +89,24 @@ static func _fill(sim: Sim, terrain: Terrain, race_list: Array, neutral: Diction
 		var hall: Dictionary = race["buildings"][String(start["hall"])]
 		sim.spawn_building(player, String(start["hall"]), hall, Vector2i(base) - Vector2i(2, 2))
 		keep.append([base, 12.0])
-		# рудник сбоку от базы
-		var mine_angle := 0.0
+		var glade := base + to_center * 4.0      # середина поляны: ратуша в её глубине
+		# рудник — между ратушей и выходом
+		var mine_keep: Array = []
 		for attempt in 60:
-			mine_angle = (1.0 if attempt % 2 == 0 else -1.0) * rng.randf_range(1.2, 2.2)
-			var p := base + to_center.rotated(mine_angle) * rng.randf_range(8.5, 10.5)
+			var mine_angle := (1.0 if attempt % 2 == 0 else -1.0) * rng.randf_range(0.6, 0.95)
+			var p := base + to_center.rotated(mine_angle) * rng.randf_range(9.0, 10.5)
 			if _place_mine(sim, p):
 				keep.append([p, 4.5])
+				mine_keep.append([p, 4.0])
 				spots.append(p)
 				break
-		# лес с другой стороны
-		for attempt in 60:
-			var a := -signf(mine_angle) * rng.randf_range(1.0, 2.2)
-			var c := base + to_center.rotated(a) * rng.randf_range(12.5, 14.5)
-			if sim.in_map(Vector2i(c)) and not sim.is_blocked(Vector2i(c)):
-				_forest(sim, rng, c, 30, 2.4, keep)
-				keep.append([c, 4.0])
-				break
+		for ex in exits:
+			var dir := to_center.rotated(float(ex))
+			for dist in [wall_r - 1.0, wall_r + 2.5, wall_r + 6.5]:
+				corridors.append(glade + dir * dist)
+		if walls_on:
+			_wall(sim, terrain, glade, to_center, wall_r, exits, wall_phase, hard_keep + mine_keep)
+		keep.append([glade, wall_r - 0.5])      # внутри поляны случайный лес не растёт
 		# стартовые рабочие перед базой
 		var front := base + to_center * 5.5
 		var side := to_center.rotated(PI / 2)
@@ -104,22 +117,28 @@ static func _fill(sim: Sim, terrain: Terrain, race_list: Array, neutral: Diction
 				sim.units[id]["facing"] = to_center
 				cnt += 1
 
+	for c in corridors:      # проходы у выходов не зарастают и не застраиваются
+		keep.append([c, 4.5])
+		spots.append(c)
+
 	# --- рудники на карте ---
 	# «свои» рудники у каждого игрока: всего 2 на маленькой карте, 3 на большой, 4 на огромной
-	# (один у базы и остальные дальше — под новую ратушу; чем дальше, тем сильнее охрана)
+	# (один у базы и остальные дальше — под новую ратушу; чем дальше, тем сильнее охрана).
+	# Ближние ставятся снаружи напротив выходов с поляны. В них вдвое больше золота.
 	var own: int = int(OWN_MINES.get(sim.map_size, 2)) - 1
 	for i in own:
-		var dmin := 17.0 + 8.0 * i * sqrt(k)
-		var placed: Array = _ring(sim, rng, terrain, spots, 7, dmin, dmin + 12.0 * sqrt(k), 8.0, true)
+		var dmin := maxf(17.0, wall_r + 9.0) + 8.0 * i * sqrt(k)
+		var aims: Array = exits if i == 0 else []
+		var placed: Array = _ring(sim, rng, terrain, spots, 7, dmin, dmin + 12.0 * sqrt(k), 8.0, true, true, aims)
 		if placed.is_empty():
 			placed = _ring(sim, rng, terrain, spots, 5, dmin - 3.0, dmin + 22.0 * sqrt(k), 6.0, true)
 		for m in placed:
-			_place_mine(sim, m)
+			_place_mine(sim, m, EXTRA_GOLD)
 			mines.append([m, mini(5, 2 + i)])
 			keep.append([m, 6.0])
 	for i in groups:
 		for m in _ring(sim, rng, terrain, spots, 5, 26.0, 999.0, 14.0):
-			_place_mine(sim, m)
+			_place_mine(sim, m, EXTRA_GOLD)
 			mines.append([m, 4])
 			keep.append([m, 6.0])
 
@@ -227,9 +246,11 @@ static func _fill(sim: Sim, terrain: Terrain, race_list: Array, neutral: Diction
 		var base: Vector2 = terrain.bases[player]
 		var dir := (center - base).normalized()
 		for attempt in 60:
-			var p := base + dir.rotated(rng.randf_range(-0.9, 0.9)) * rng.randf_range(17.0, 24.0)
+			var p := base + dir.rotated(rng.randf_range(-0.9, 0.9)) * rng.randf_range(wall_r + 9.0, wall_r + 16.0)
 			var cell := Vector2i(p) - Vector2i(1, 1)
 			var ok := sim.can_place(5, cell - Vector2i(1, 1))
+			for cp in corridors:
+				ok = ok and p.distance_to(cp) > 5.0
 			for c in camps:
 				ok = ok and p.distance_to(c[0]) > 9.0
 			if ok:
@@ -250,6 +271,32 @@ static func _fill(sim: Sim, terrain: Terrain, race_list: Array, neutral: Diction
 			continue
 		_forest(sim, rng, c, size, spread, keep)
 
+	# выход с поляны должен вести наружу: если за ним вода или скалы — прорубаем лес вдоль выходов
+	for player in n:
+		var base: Vector2 = terrain.bases[player]
+		var fwd := (center - base).normalized()
+		var glade := base + fwd * 4.0
+		for ex in exits:
+			if sim.path_exists(base + fwd * 6.0, center):
+				break
+			_carve(sim, glade, glade + fwd.rotated(float(ex)) * (wall_r + 12.0), 2.6)
+
+
+## Убирает деревья вдоль отрезка a–b (полоса шириной 2·half).
+static func _carve(sim: Sim, a: Vector2, b: Vector2, half: float) -> void:
+	var gone: Array = []
+	for id in sim.resources:
+		var r: Dictionary = sim.resources[id]
+		if String(r["kind"]) != "tree":
+			continue
+		var q: Vector2 = r["pos"]
+		var t := clampf((q - a).dot(b - a) / maxf(0.001, (b - a).length_squared()), 0.0, 1.0)
+		if q.distance_to(a.lerp(b, t)) < half:
+			gone.append(id)
+	for id in gone:
+		sim._set_solid(Rect2i(sim.resources[id]["cell"], Vector2i.ONE), false)
+		sim.resources.erase(id)
+
 
 static func _near_base(terrain: Terrain, p: Vector2) -> float:
 	var d := INF
@@ -262,13 +309,16 @@ static func _near_base(terrain: Terrain, p: Vector2) -> float:
 ## (для двух игроков — отражение через центр). Так у всех игроков всё одинаково.
 ## size — сколько клеток должно быть свободно; dmin/dmax — расстояние от ближайшей базы;
 ## sep — отступ от уже занятых мест и друг от друга.
-static func _ring(sim: Sim, rng: RandomNumberGenerator, terrain: Terrain, spots: Array, size: int, dmin: float, dmax: float, sep: float, near_base := false, clear := true) -> Array:
+static func _ring(sim: Sim, rng: RandomNumberGenerator, terrain: Terrain, spots: Array, size: int, dmin: float, dmax: float, sep: float, near_base := false, clear := true, aims: Array = []) -> Array:
 	var center: Vector2 = terrain.CENTER
 	var n: int = terrain.bases.size()
 	for attempt in (500 if near_base else 400):
 		var p := Vector2(rng.randf_range(8, sim.map_size - 8), rng.randf_range(8, sim.map_size - 8))
 		if near_base:      # ищем вокруг первой базы — копии для остальных получаются поворотом
-			p = (terrain.bases[0] as Vector2) + Vector2(rng.randf_range(dmin, dmax), 0).rotated(rng.randf() * TAU)
+			var ang := rng.randf() * TAU
+			if not aims.is_empty() and attempt < 300:      # напротив выходов с поляны (углы — от направления на центр)
+				ang = (center - (terrain.bases[0] as Vector2)).angle() + float(aims[attempt % aims.size()]) + rng.randf_range(-0.6, 0.6)
+			p = (terrain.bases[0] as Vector2) + Vector2(rng.randf_range(dmin, dmax), 0).rotated(ang)
 			if p.x < 8.0 or p.y < 8.0 or p.x > sim.map_size - 8.0 or p.y > sim.map_size - 8.0:
 				continue
 		var d := _near_base(terrain, p)
@@ -326,12 +376,44 @@ static func _clear_props(sim: Sim, terrain: Terrain, q: Vector2, size: int) -> v
 		terrain.props = terrain.props.filter(func(pr) -> bool: return not gone.has(Vector2i(floori(pr["pos"].x), floori(pr["pos"].y))))
 
 
-static func _place_mine(sim: Sim, p: Vector2) -> bool:
+static func _place_mine(sim: Sim, p: Vector2, gold: int = 0) -> bool:
 	var cell := Vector2i(p) - Vector2i(1, 1)
 	if not sim.can_place(5, cell - Vector2i(1, 1)):
 		return false
-	sim.add_resource("gold", cell, 3)
+	var id := sim.add_resource("gold", cell, 3)
+	if gold > 0:
+		sim.resources[id]["amount"] = gold
+		sim.resources[id]["max"] = gold
 	return true
+
+
+## Кольцо леса вокруг поляны базы: от r до r+3 клеток от её середины, края неровные.
+## exits — углы выходов (от направления fwd), там кольцо разорвано на ~6 клеток.
+static func _wall(sim: Sim, terrain: Terrain, glade: Vector2, fwd: Vector2, r: float, exits: Array, phase: float, keep: Array) -> void:
+	var thick := 3.4
+	var reach := r + thick + 2.5
+	for x in range(floori(glade.x - reach), ceili(glade.x + reach) + 1):
+		for y in range(floori(glade.y - reach), ceili(glade.y + reach) + 1):
+			var c := Vector2i(x, y)
+			if not sim.in_map(c) or sim.is_blocked(c):
+				continue
+			var q := Vector2(c) + Vector2(0.5, 0.5)
+			var a := fwd.angle_to(q - glade)
+			var inner := r + 1.3 * sin(a * 3.0 + phase) + 0.7 * sin(a * 7.0 + phase * 1.7)
+			var d := q.distance_to(glade)
+			if d < inner or d > inner + thick:
+				continue
+			var gap := false
+			for ex in exits:
+				if absf(angle_difference(a, float(ex))) * d < 3.2:      # ширина выхода ~6 клеток
+					gap = true
+			if gap:
+				continue
+			for kp in keep:
+				if q.distance_to(kp[0]) < float(kp[1]):
+					gap = true
+			if not gap:
+				sim.add_resource("tree", c, 1)
 
 
 static func _forest(sim: Sim, rng: RandomNumberGenerator, center: Vector2, count: int, spread: float, keep: Array) -> void:

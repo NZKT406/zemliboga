@@ -118,19 +118,33 @@ function Update-Game {
 		$tree = Invoke-GitHub GET "$api/git/trees/$sha`?recursive=1"
 		Load-HashCache
 		$todo = New-Object System.Collections.ArrayList
+		$kept = New-Object System.Collections.ArrayList
 		$remote = @{}
 		foreach ($e in $tree.tree) {
 			if ($e.type -ne 'blob' -or (Test-Excluded $e.path) -or $e.path -eq 'README.md') { continue }
 			$remote[$e.path] = $e.sha
 			$full = Join-Path $Root $e.path
-			if (-not (Test-Path -LiteralPath $full) -or (Get-BlobSha $full $e.path) -ne $e.sha) {
+			if (-not (Test-Path -LiteralPath $full)) {
 				[void]$todo.Add($e)
+				continue
 			}
+			$localSha = Get-BlobSha $full $e.path
+			if ($localSha -eq $e.sha) { continue }
+			# Файл изменён на этом компьютере после прошлого обновления (например, в папке, где игру
+			# делают и откуда её публикуют): не затираем его — иначе пропадёт неопубликованная работа.
+			$known = $null
+			if ($null -ne $manifest -and $null -ne $manifest.files) { $known = $manifest.files.($e.path) }
+			if ($null -ne $known -and $localSha -ne $known) {
+				[void]$kept.Add($e.path)
+				continue
+			}
+			[void]$todo.Add($e)
 		}
+		$keptNote = $(if ($kept.Count -gt 0) { " Не тронуты изменённые на этом компьютере файлы ($($kept.Count)) — сначала опубликуйте их (PUBLISH.bat)." } else { '' })
 		if ($todo.Count -eq 0) {
 			Save-HashCache
 			Write-Json $ManifestPath @{ commit = $sha; files = $remote }
-			Say "У вас последняя версия. Приятной игры!"
+			Say $(if ($kept.Count -gt 0) { "Обновлений для неизменённых файлов нет.$keptNote" } else { "У вас последняя версия. Приятной игры!" })
 			return $true
 		}
 		$total = 0
@@ -160,7 +174,8 @@ function Update-Game {
 			foreach ($p in $manifest.files.PSObject.Properties) {
 				if (-not $remote.ContainsKey($p.Name)) {
 					$old = Join-Path $Root $p.Name
-					if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Force }
+					# удаляем, только если файл не меняли на этом компьютере
+					if ((Test-Path -LiteralPath $old) -and (Get-BlobSha $old $p.Name) -eq $p.Value) { Remove-Item -LiteralPath $old -Force }
 				}
 			}
 		}
@@ -168,7 +183,7 @@ function Update-Game {
 		Save-HashCache
 		Write-Json $ManifestPath @{ commit = $sha; files = $remote }
 		Show-Local
-		Say "Обновление установлено (файлов: $($todo.Count)). Новости — выше."
+		Say "Обновление установлено (файлов: $($todo.Count)). Новости — выше.$keptNote"
 		return $true
 	} catch {
 		Say "Не удалось обновиться: $($_.Exception.Message). Можно играть в текущую версию."

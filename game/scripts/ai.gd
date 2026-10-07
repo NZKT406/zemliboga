@@ -1,4 +1,4 @@
-﻿extends RefCounted
+extends RefCounted
 ## Компьютерный противник. Он не жульничает с правилами: управляет своей стороной
 ## теми же командами, что и игрок (sim.push_command). Думает раз в секунду.
 
@@ -224,7 +224,7 @@ func _repair_base(idle: Array) -> void:
 
 func _has_supply(def: Dictionary) -> bool:
 	var p: Dictionary = sim.players[me]
-	return int(p["supply_used"]) + int(def.get("supply", 0)) <= int(p["supply_cap"])
+	return int(p["supply_used"]) + int(def.get("supply", 0)) <= sim.supply_max(me)
 
 
 # ---------- строительство ----------
@@ -248,8 +248,8 @@ func _construction() -> void:
 	if sim.tick < int(s["next_build"]) or _workers.is_empty():
 		return
 	var want := ""
-	var free: int = int(p["supply_cap"]) - int(p["supply_used"])
-	if free < 8 and _wip("supply") < (2 if int(p["supply_cap"]) > 30 else 1) and int(p["supply_cap"]) < 120:
+	var free: int = sim.supply_max(me) - int(p["supply_used"])
+	if free < 8 and _wip("supply") < (2 if int(p["supply_cap"]) > 30 else 1) and int(p["supply_cap"]) < sim.supply_limit(me) + 4:
 		want = "supply"
 	elif _count("barracks") == 0:
 		want = "barracks"
@@ -272,8 +272,9 @@ func _construction() -> void:
 	if want == "" or not defs.has(want):
 		return
 	var def: Dictionary = defs[want]
-	if not _afford(def["cost"], false):
-		_saving = {"gold": int(def["cost"].get("gold", 0)), "wood": int(def["cost"].get("wood", 0))}   # копим на здание
+	var bcost: Dictionary = sim.build_cost(me, want)
+	if not _afford(bcost, false):
+		_saving = {"gold": int(bcost.get("gold", 0)), "wood": int(bcost.get("wood", 0))}   # копим на здание
 		return
 	var cell := _find_spot(int(def["size"]), want == "tower")
 	if cell.x < 0:
@@ -348,12 +349,19 @@ func _production() -> void:
 			if (sim.buildings[bid]["queue"] as Array).is_empty() and _afford(sim.upgrade_cost(me, "tier")):
 				_cmd({"type": "research", "building": bid, "upgrade": "tier"})
 				break
+	# амбары: войско упёрлось в предел пищи — поднимаем его
+	if (p["data"]["upgrades"] as Dictionary).has("granary") and sim.supply_limit(me) < sim.SUPPLY_TOP and int(p["supply_used"]) >= sim.supply_limit(me) - 12 \
+			and not p["research_wip"].has("granary"):
+		for bid in _done("hall"):
+			if (sim.buildings[bid]["queue"] as Array).is_empty() and _afford(sim.upgrade_cost(me, "granary")):
+				_cmd({"type": "research", "building": bid, "upgrade": "granary"})
+				break
 	for bid in _research_buildings():      # кузница, а у огров и нагов — логово и казармы
 		var fb: Dictionary = sim.buildings[bid]
 		if not (fb["queue"] as Array).is_empty() or _army.size() < 6:
 			continue
 		for key in fb["def"].get("researches", []):
-			if String(key) == "tier":
+			if String(key) == "tier" or String(key) == "granary":      # амбары — отдельно, когда упрёмся в предел пищи
 				continue
 			var up: Dictionary = p["data"]["upgrades"][key]
 			if int(up.get("tier", 1)) > sim.tier(me):
@@ -543,7 +551,7 @@ func _military() -> void:
 		var p: Dictionary = sim.players[me]
 		if sim.tick < int(_p["first_attack"]):
 			need = 999     # в начале игры противник не нападает
-		if _army.size() >= need or (sim.tick >= int(_p["first_attack"]) and int(p["supply_cap"]) >= 60 and int(p["supply_used"]) >= int(p["supply_cap"]) - 3):
+		if _army.size() >= need or (sim.tick >= int(_p["first_attack"]) and sim.supply_max(me) >= 60 and int(p["supply_used"]) >= sim.supply_max(me) - 3):
 			s["state"] = "attack"
 			s["wave"] = int(s["wave"]) + 1
 		else:

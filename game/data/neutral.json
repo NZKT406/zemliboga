@@ -387,11 +387,19 @@
 		},
 		"red_dragon": {
 			"name": "Красный дракон", "role": "boss", "level": 10, "supply": 0, "boss": true,
-			"description": "Владыка вулкана. Кто нанесёт ему больше всего урона, получит «Силу дракона» для всех своих героев.",
-			"hp": 16000, "damage": 150, "attack_cooldown": 2.2, "range": 2.4, "damage_type": "chaos",
+			"description": "Владыка вулкана. Раз в 27 секунд боя призывает трёх дракончиков. Кто нанесёт ему больше всего урона, получит «Силу дракона» для всех своих героев и «Драконье золото» — рабочие 8 минут добывают на 15% больше.",
+			"hp": 20000, "damage": 150, "attack_cooldown": 2.2, "range": 2.4, "damage_type": "chaos",
 			"armor": 8, "armor_type": "heavy", "speed": 2.6, "radius": 2.0, "mana": 0, "mana_regen": 0, "bounty": 1000,
 			"splash_radius": 2.8, "splash": 0.5, "hp_regen": 15,
+			"autocast": {"kind": "summon", "unit": "dragon_whelp", "count": 3, "cooldown": 27, "max": 6, "duration": 45, "range": 12, "color": "#ff7a2a"},
 			"model": {"shape": "dragon", "scale": 1.0, "color": "#a8281a"}
+		},
+		"dragon_whelp": {
+			"name": "Дракончик", "role": "neutral", "level": 3, "supply": 0,
+			"description": "Детёныш красного дракона: прилетает на помощь отцу и через 45 секунд улетает.",
+			"hp": 480, "damage": 30, "attack_cooldown": 1.5, "range": 1.2, "damage_type": "magic",
+			"armor": 2, "armor_type": "medium", "speed": 3.6, "radius": 0.6, "mana": 0, "mana_regen": 0, "bounty": 12,
+			"model": {"shape": "dragon", "scale": 0.3, "color": "#c8461e"}
 		},
 		"cave_spider": {
 			"name": "Пещерный паук", "role": "neutral", "level": 2, "supply": 0,

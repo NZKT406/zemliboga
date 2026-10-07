@@ -1,4 +1,4 @@
-﻿extends RefCounted
+extends RefCounted
 ## Симуляция игры: ТОЛЬКО правила, никакой графики.
 ## Работает фиксированными шагами (тиками). Изменить состояние игры можно
 ## единственным способом: отправить команду через push_command().
@@ -51,6 +51,10 @@ var _pending: Array = []
 var _grid := AStarGrid2D.new()
 var _swim := AStarGrid2D.new()    # та же карта для пловцов (наги): вода для них проходима
 var _water: Dictionary = {}       # клетки с водой (непроходимы для всех, кроме пловцов)
+# те же непроходимые клетки простым массивом (1 — занята): спросить его дешевле, чем объект поиска пути,
+# и так можно с нескольких ядер сразу (вызовы методов объектов ядра выстраивают в очередь)
+var _solid := PackedByteArray()
+var _solid_sw := PackedByteArray()
 var _side := PackedInt32Array()   # сторона каждого игрока: у союзников одно и то же число
 var corpses: Dictionary = {}      # id -> {id, pos, expires}: тела павших (ими кормятся гули, их поднимают некроманты)
 var high_cells: Dictionary = {}   # клетки на вершинах возвышенностей (строятся из зерна карты, у всех одинаковые)
@@ -106,6 +110,10 @@ func set_map_size(n: int) -> void:
 		g.default_estimate_heuristic = AStarGrid2D.HEURISTIC_OCTILE
 		g.default_compute_heuristic = AStarGrid2D.HEURISTIC_OCTILE
 		g.update()
+	_solid = PackedByteArray()
+	_solid.resize(n * n)
+	_solid_sw = PackedByteArray()
+	_solid_sw.resize(n * n)
 
 
 # ---------- создание мира ----------
@@ -121,10 +129,12 @@ func add_player(player: int, race: Dictionary) -> void:
 ## water — клетка непроходима только из-за воды: пловцы (наги) по ней ходят.
 func block_cell(cell: Vector2i, water := false) -> void:
 	_grid.set_point_solid(cell, true)
+	_solid[cell.y * map_size + cell.x] = 1
 	if water:
 		_water[cell] = true
 	else:
 		_swim.set_point_solid(cell, true)
+		_solid_sw[cell.y * map_size + cell.x] = 1
 
 
 func _set_solid(rect: Rect2i, solid: bool) -> void:
@@ -133,6 +143,8 @@ func _set_solid(rect: Rect2i, solid: bool) -> void:
 			if in_map(Vector2i(x, y)):
 				_grid.set_point_solid(Vector2i(x, y), solid)
 				_swim.set_point_solid(Vector2i(x, y), solid)
+				_solid[y * map_size + x] = 1 if solid else 0
+				_solid_sw[y * map_size + x] = 1 if solid else 0
 
 
 func in_water(p: Vector2) -> bool:
@@ -162,7 +174,10 @@ func race_trait(player: int, key: String) -> bool:
 
 
 func swims(u: Dictionary) -> bool:
-	return has_trait(u, "amphibious")
+	if u["def"].has("amphibious"):      # без вызова has_trait со строкой: его зовут все ядра на каждом шаге
+		return true
+	var tr = u.get("_tr")
+	return has_trait(u, "amphibious") if tr == null else (tr as Dictionary).has("amphibious")
 
 
 const WATER_REGEN := 5.0          # наги: здоровья в секунду, пока в воде
@@ -528,6 +543,7 @@ func add_resource(kind: String, cell: Vector2i, size: int = 1) -> int:
 		"id": id, "kind": kind, "cell": cell, "size": size,
 		"pos": Vector2(cell) + Vector2(size, size) * 0.5,
 		"amount": GOLD_IN_MINE if kind == "gold" else WOOD_IN_TREE,
+		"max": GOLD_IN_MINE if kind == "gold" else WOOD_IN_TREE,
 	}
 	return id
 
@@ -764,7 +780,7 @@ func _cmd_move(cmd: Dictionary, kind: String) -> void:
 		var off: Vector2 = slots[ids[i]] if ids.size() > 1 else Vector2.ZERO
 		var dest := (target + off).clamp(Vector2(0.5, 0.5), Vector2(map_size - 0.5, map_size - 0.5))
 		var dest_cell := to_cell(dest)
-		if _grid_for(swims(u)).is_point_solid(dest_cell) or taken.has(dest_cell):
+		if is_blocked(dest_cell, swims(u)) or taken.has(dest_cell):
 			dest_cell = nearest_free_cell(dest_cell, taken, swims(u))
 			dest = cell_center(dest_cell)
 		taken[dest_cell] = true
@@ -814,11 +830,13 @@ func _cmd_build(cmd: Dictionary) -> void:
 	if String(def.get("role", "")) == "hall" and not hall_spot_ok(cell, size):
 		_msg(player, "Главное здание нельзя ставить вплотную к руднику: нужен отступ %d клетки" % HALL_MINE_GAP)
 		return
-	if not can_afford(player, def.get("cost", {})):
+	var cost := build_cost(player, key)
+	if not can_afford(player, cost):
 		_msg(player, "Не хватает ресурсов")
 		return
-	_pay(player, def["cost"])
+	_pay(player, cost)
 	var id := spawn_building(player, key, def, cell, false)
+	buildings[id]["paid"] = cost
 	players[player]["stats"]["built"] += 1
 	var rect := Rect2i(cell, Vector2i(size, size))
 	for uid in units:   # кто стоял на месте стройки — отходит в сторону
@@ -827,6 +845,25 @@ func _cmd_build(cmd: Dictionary) -> void:
 			_path_to(u, cell_center(nearest_free_cell(to_cell(u["pos"]))))
 	for uid in workers:
 		_start_build(units[uid], id)
+
+
+## Цена здания для игрока. Башни и фермы (дома, шатры…) после десятой такой постройки дорожают:
+## каждая следующая — на 10% от обычной цены больше (считаются и недостроенные).
+func build_cost(player: int, key: String) -> Dictionary:
+	var def: Dictionary = players[player]["data"]["buildings"].get(key, {})
+	var base: Dictionary = def.get("cost", {})
+	var role := String(def.get("role", ""))
+	if role != "tower" and role != "supply":
+		return base
+	var n := 0
+	for id in buildings:
+		var b: Dictionary = buildings[id]
+		if int(b["player"]) == player and String(b["key"]) == key:
+			n += 1
+	if n < 10:
+		return base
+	var k := 1.0 + 0.1 * float(n - 9)
+	return {"gold": int(round(float(base.get("gold", 0)) * k)), "wood": int(round(float(base.get("wood", 0)) * k))}
 
 
 func _cmd_train(cmd: Dictionary) -> void:
@@ -872,8 +909,11 @@ func _cmd_train(cmd: Dictionary) -> void:
 	if not can_afford(player, cost):
 		_msg(player, "Не хватает ресурсов")
 		return
-	if int(players[player]["supply_used"]) + int(def.get("supply", 0)) > int(players[player]["supply_cap"]):
-		_msg(player, "Не хватает лимита: постройте %s" % String(players[player]["data"]["buildings"]["supply"]["name"]).to_lower())
+	if int(players[player]["supply_used"]) + int(def.get("supply", 0)) > supply_max(player):
+		if int(players[player]["supply_cap"]) >= supply_limit(player):
+			_msg(player, "Достигнут предел пищи (%d). Поднять его можно в главном здании" % supply_limit(player) if supply_limit(player) < SUPPLY_TOP else "Достигнут предел пищи (%d)" % SUPPLY_TOP)
+		else:
+			_msg(player, "Не хватает лимита: постройте %s" % String(players[player]["data"]["buildings"]["supply"]["name"]).to_lower())
 		return
 	_pay(player, cost)
 	players[player]["supply_used"] += int(def.get("supply", 0))   # место в лимите занимаем сразу
@@ -930,7 +970,20 @@ func _msg(player: int, text: String) -> void:
 
 # ---------- шаг симуляции ----------
 
+var prof_on := false               # замер частей тика (проверки скорости): часть -> сумма мкс
+var prof: Dictionary = {}
+
+
+func _pp(key: String, t0: int) -> int:
+	if not prof_on:
+		return 0
+	var now := Time.get_ticks_usec()
+	prof[key] = int(prof.get(key, 0)) + now - t0
+	return now
+
+
 func step() -> void:
+	var pt := Time.get_ticks_usec() if prof_on else 0
 	tick += 1
 	var all_ids: Array = units.keys()
 	all_ids.sort()
@@ -942,17 +995,33 @@ func step() -> void:
 		else:
 			rest.append(cmd)
 	_pending = rest
+	pt = _pp("commands", pt)
 
 	var ids: Array = units.keys()
 	ids.sort()
-	for id in ids:
-		_move_unit(units[id])
+	_par_ids = ids
+	_par(ids.size(), PAR_MOVE)
+	pt = _pp("move*", pt)
 	_rebuild_buckets(ids)
 	_separate(ids)
+	pt = _pp("separate*", pt)
 	_collect_auras(ids)
+	if _bindex_dirty:
+		_rebuild_bindex()      # дальше указатель зданий только читается (в том числе с нескольких ядер)
+	pt = _pp("auras", pt)
+	_par(ids.size(), PAR_SENSE)      # каждый юнит обновляет только себя
+	pt = _pp("sense*", pt)
+	_res.clear()
+	_res.resize(ids.size())
+	_par(ids.size(), PAR_QUERY)      # каждый смотрит на соседей, ответ — в свою ячейку _res
+	for i in ids.size():
+		if _res[i] != null:
+			units[ids[i]]["_q"] = _res[i]
+	pt = _pp("query*", pt)
 	for id in ids:
 		if units.has(id):   # юнит мог погибнуть в этом же тике
 			_think(units[id])
+	pt = _pp("think", pt)
 	var pids: Array = projectiles.keys()
 	pids.sort()
 	for id in pids:
@@ -962,6 +1031,7 @@ func step() -> void:
 	for id in bids:
 		if buildings.has(id):
 			_update_building(buildings[id])
+	pt = _pp("buildings", pt)
 	_respawn_camps()
 	_update_runes()
 	_update_caravans()
@@ -974,6 +1044,104 @@ func step() -> void:
 		gone.sort()
 		for cid in gone:
 			_remove_corpse(cid, "rot")
+	_pp("world", pt)
+
+
+## ---------- многоядерность ----------
+## Части тика, где каждый юнит считается сам по себе, раздаются нескольким ядрам.
+## Правила, без которых игры у разных компьютеров разошлись бы (или игра упала):
+##  * в одной такой части юнит либо меняет только СЕБЯ и ни на кого не смотрит (_move_at, _sense_at),
+##    либо смотрит на соседей, но ответ пишет только в свою ячейку _res (_separate, _query_at);
+##  * ответ зависит лишь от состояния до начала части, а не от того, какое ядро успело раньше, —
+##    поэтому результат одинаков при любом числе ядер (и при одном);
+##  * всё, что задевает других (удары, смерти, деньги, события), делается по-прежнему по очереди.
+
+var threads := 1                   # сколько ядер может занять тик (задаёт main; 1 — всё на одном)
+const PAR_MIN := 40                # меньше юнитов — быстрее посчитать подряд, чем раздавать
+var _par_ids: Array = []           # юниты текущей части (по возрастанию номеров)
+var _par_kind := 0                 # какая часть считается: PAR_MOVE, PAR_PUSH, PAR_SENSE, PAR_QUERY
+const PAR_MOVE := 0
+const PAR_PUSH := 1
+const PAR_SENSE := 2
+const PAR_QUERY := 3
+var _par_chunk := 1
+var _res: Array = []               # ответы частей «смотрим на соседей»: ячейка i — для юнита _par_ids[i]
+
+
+var _par_mx := Mutex.new()
+var _par_next := 0                 # следующий не взятый кусок
+var _par_chunks := 0
+
+
+func _par(n: int, kind: int) -> void:
+	_par_kind = kind
+	if threads <= 1 or n < PAR_MIN:
+		_par_range(0, n)
+		return
+	# кусков больше, чем ядер: кто освободился — берёт следующий. Считает и сам раздающий поток.
+	_par_chunk = maxi(4, ceili(float(n) / float(threads * 4)))
+	_par_chunks = ceili(float(n) / float(_par_chunk))
+	_par_next = 0
+	var gid := WorkerThreadPool.add_group_task(_par_worker, threads - 1, threads - 1, true, "sim part")
+	_par_worker(0)
+	WorkerThreadPool.wait_for_group_task_completion(gid)
+
+
+func _par_worker(_w: int) -> void:
+	while true:
+		_par_mx.lock()
+		var k := _par_next
+		_par_next += 1
+		_par_mx.unlock()
+		if k >= _par_chunks:
+			return
+		_par_range(k * _par_chunk, mini(k * _par_chunk + _par_chunk, _par_ids.size()))
+
+
+## Прямые вызовы, без Callable: вызов через Callable берёт общую блокировку движка,
+## и ядра стояли бы в очереди друг за другом.
+func _par_range(a: int, b: int) -> void:
+	match _par_kind:
+		PAR_MOVE:
+			for i in range(a, b):
+				_move_unit(units[_par_ids[i]])
+		PAR_PUSH:
+			for i in range(a, b):
+				_push_at(i)
+		PAR_SENSE:
+			for i in range(a, b):
+				_sense_at(i)
+		PAR_QUERY:
+			for i in range(a, b):
+				_query_at(i)
+
+
+## Подготовка к раздумьям: всё, что юнит узнаёт только о себе (стоит ли, укрылся ли, на холме ли,
+## текущие характеристики). У дремлющих нейтралов и особых случаев это делает сам _think.
+func _sense_at(i: int) -> void:
+	var u: Dictionary = units[_par_ids[i]]
+	if u.has("merc_idle") or u.has("pre_militia") or (int(u["expires"]) >= 0 and tick >= int(u["expires"])) or _napping(u):
+		return
+	_sense_self(u)
+	_refresh_self(u)
+	u["_pre"] = tick
+
+
+## Взгляд на соседей до раздумий: ближайший враг (для тех, кто сам ищет цель) и свободное место
+## у цели (для тех, кто её догоняет). Пишет только в _res[i]; _think берёт готовое, если оно ещё верно.
+func _query_at(i: int) -> void:
+	var u: Dictionary = units[_par_ids[i]]
+	if int(u.get("_pre", -1)) != tick or float(u["swing"]) >= 0.0 or tick < int(u["stun"]):
+		return
+	var o: Dictionary = u["order"]
+	var kind := String(o.get("type", "idle"))
+	if kind == "idle" or kind == "amove":
+		if _may_acquire(u):
+			_res[i] = [tick, _nearest_enemy(u["pos"], int(u["player"]), ACQUIRE, true), -1, Vector2.ZERO]
+	elif kind == "attack" and int(u["wait"]) <= 0:
+		var t = entity(int(o["target"]))
+		if t != null and not t["is_building"] and gap(u, t) > float(u["range"]):
+			_res[i] = [tick, -2, int(t["id"]), _attack_spot(u, t)]
 
 
 func _move_unit(u: Dictionary) -> void:
@@ -1048,35 +1216,54 @@ func _candidates(pos: Vector2, radius: float) -> Array:
 
 ## Юниты мягко расталкивают друг друга, чтобы не стоять один в другом.
 func _separate(ids: Array) -> void:
-	# Соседей берём прямо из клеток сетки (без промежуточных списков и сортировок):
+	# Сначала каждый юнит (на любом ядре) складывает толчки от всех соседей по положениям
+	# на начало шага, потом толчки применяются по порядку. Соседей берём прямо из клеток сетки:
 	# порядок обхода клеток и юнитов в них одинаков на всех компьютерах.
-	for ida in ids:
-		var ua: Dictionary = units[ida]
-		var ra: float = float(ua["radius"])
-		var reach: float = ra + MAX_RADIUS
-		var pa: Vector2 = ua["pos"]
-		var lo := _bucket_of(pa - Vector2(reach, reach))
-		var hi := _bucket_of(pa + Vector2(reach, reach))
-		for cy in range(lo.y, hi.y + 1):
-			for cx in range(lo.x, hi.x + 1):
-				var list = _buckets.get(Vector2i(cx, cy))
-				if list == null:
+	_par_ids = ids
+	_res.clear()
+	_res.resize(ids.size())
+	_par(ids.size(), PAR_PUSH)
+	for i in ids.size():
+		if _res[i] != null:
+			_try_shift(units[ids[i]], _res[i])
+
+
+func _push_at(i: int) -> void:
+	var ida: int = _par_ids[i]
+	var ua: Dictionary = units[ida]
+	var ra: float = float(ua["radius"])
+	var reach: float = ra + MAX_RADIUS
+	var pa: Vector2 = ua["pos"]
+	var lo := _bucket_of(pa - Vector2(reach, reach))
+	var hi := _bucket_of(pa + Vector2(reach, reach))
+	var total := Vector2.ZERO
+	var any := false
+	for cy in range(lo.y, hi.y + 1):
+		for cx in range(lo.x, hi.x + 1):
+			var list = _buckets.get(Vector2i(cx, cy))
+			if list == null:
+				continue
+			for idb in list:
+				if int(idb) == ida:
 					continue
-				for idb in list:
-					if int(idb) <= int(ida):
-						continue
-					var ub: Dictionary = units[idb]
-					var delta: Vector2 = ub["pos"] - ua["pos"]
-					var min_d: float = ra + float(ub["radius"])
-					if absf(delta.x) >= min_d or absf(delta.y) >= min_d:
-						continue
-					var d := delta.length()
-					if d >= min_d:
-						continue
-					var dir := Vector2(1, 0).rotated(float(int(ida) * 7 + int(idb) * 13)) if d < 0.001 else delta / d
-					var push := dir * (min_d - d) * 0.25
-					_try_shift(ua, -push)
-					_try_shift(ub, push)
+				var ub: Dictionary = units[idb]
+				var delta: Vector2 = (ub["pos"] as Vector2) - pa
+				var min_d: float = ra + float(ub["radius"])
+				if absf(delta.x) >= min_d or absf(delta.y) >= min_d:
+					continue
+				var d := delta.length()
+				if d >= min_d:
+					continue
+				var dir: Vector2
+				if d < 0.001:      # стоят точка в точку: расходятся в стороны, заданные парой номеров
+					var lo_id := mini(ida, int(idb))
+					dir = Vector2(1, 0).rotated(float(lo_id * 7 + maxi(ida, int(idb)) * 13)) * (1.0 if ida == lo_id else -1.0)
+				else:
+					dir = delta / d
+				total -= dir * (min_d - d) * 0.25
+				any = true
+	if any:
+		_res[i] = total
 
 
 func _try_shift(u: Dictionary, shift: Vector2) -> void:
@@ -1084,7 +1271,7 @@ func _try_shift(u: Dictionary, shift: Vector2) -> void:
 		return   # работающих, бьющих и неподвижных (глаз-наблюдатель) не толкаем
 	var p: Vector2 = u["pos"] + shift
 	var c := to_cell(p)
-	if in_map(c) and not _grid_for(swims(u)).is_point_solid(c):
+	if in_map(c) and not is_blocked(c, swims(u)):
 		u["pos"] = p
 
 
@@ -1143,24 +1330,13 @@ func _think(u: Dictionary) -> void:
 	if int(u["expires"]) >= 0 and tick >= int(u["expires"]):
 		_kill(u, NEUTRAL)       # время призванного существа вышло
 		return
-	# нейтралы, спокойно стоящие в лагере целыми и невредимыми, «дремлют»: думают раз в 4 тика
-	# (на большой карте их больше половины всех юнитов, а делать им нечего)
-	if int(u["player"]) == NEUTRAL and (tick + int(u["id"])) % 4 != 0 and String(u["order"].get("type", "idle")) == "idle" \
-			and float(u["swing"]) < 0.0 and float(u["hp"]) >= float(u["max_hp"]) and (u["buffs"] as Array).is_empty() \
-			and int(u["path_i"]) >= (u["path"] as PackedVector2Array).size() and tick >= int(u["stun"]):
+	if _napping(u):
 		return
-	# сколько тиков юнит стоит на месте (для «окопа» гномов и укрытия эльфов)
-	if (u["pos"] as Vector2).distance_squared_to(u["prev_pos"]) < 0.0004 and float(u["swing"]) < 0.0:
-		u["still"] = int(u.get("still", 0)) + 1
-	else:
-		u["still"] = 0
-	# эльфы ночью: кто стоит без дела 2 с, не бьёт и не ранен, становится невидим для врагов
-	u["hidden"] = has_trait(u, "shadowmeld") and is_night() and int(u["still"]) >= 20 \
-		and tick - int(u.get("fought", -999)) > 30 and String(u["order"].get("type", "idle")) in ["idle", "move", "home"]
-	if u.has("pre_militia") and not _has_buff(u, "militia"):
-		_end_militia(u)
-	u["high"] = high_cells.has(Vector2i(floori((u["pos"] as Vector2).x), floori((u["pos"] as Vector2).y)))      # стоит на возвышенности
-	_refresh_stats(u)
+	if int(u.get("_pre", -1)) != tick:      # не подготовлен заранее (см. _sense_at) — готовимся здесь
+		_sense_self(u)
+		if u.has("pre_militia") and not _has_buff(u, "militia"):
+			_end_militia(u)
+		_refresh_self(u)
 	if swims(u) and in_water(u["pos"]):      # наги в воде залечивают раны
 		u["hp"] = minf(float(u["max_hp"]), float(u["hp"]) + WATER_REGEN * TICK_DT)
 	if float(u["max_mana"]) > 0.0:
@@ -1235,6 +1411,38 @@ func _think(u: Dictionary) -> void:
 					_path_to(u, leader["pos"])
 			else:
 				_stop_path(u)
+
+
+## Нейтралы, спокойно стоящие в лагере целыми и невредимыми, «дремлют»: думают раз в 4 тика
+## (на большой карте их больше половины всех юнитов, а делать им нечего).
+func _napping(u: Dictionary) -> bool:
+	# строку (вид приказа) сравниваем последней: строки на нескольких ядрах сразу — дорогие
+	return int(u["player"]) == NEUTRAL and (tick + int(u["id"])) % 4 != 0 \
+			and float(u["swing"]) < 0.0 and float(u["hp"]) >= float(u["max_hp"]) and (u["buffs"] as Array).is_empty() \
+			and int(u["path_i"]) >= (u["path"] as PackedVector2Array).size() and tick >= int(u["stun"]) \
+			and String(u["order"].get("type", "idle")) == "idle"
+
+
+func _sense_self(u: Dictionary) -> void:
+	# сколько тиков юнит стоит на месте (для «окопа» гномов и укрытия эльфов)
+	if (u["pos"] as Vector2).distance_squared_to(u["prev_pos"]) < 0.0004 and float(u["swing"]) < 0.0:
+		u["still"] = int(u.get("still", 0)) + 1
+	else:
+		u["still"] = 0
+	# эльфы ночью: кто стоит без дела 2 с, не бьёт и не ранен, становится невидим для врагов
+	u["hidden"] = is_night() and int(u["still"]) >= 20 and tick - int(u.get("fought", -999)) > 30 \
+		and has_trait(u, "shadowmeld") and String(u["order"].get("type", "idle")) in ["idle", "move", "home"]
+
+
+func _refresh_self(u: Dictionary) -> void:
+	u["high"] = high_cells.has(Vector2i(floori((u["pos"] as Vector2).x), floori((u["pos"] as Vector2).y)))      # стоит на возвышенности
+	_refresh_stats(u)
+
+
+## Готовый ответ _query_at этого тика (или null).
+func _ready_q(u: Dictionary):
+	var q = u.get("_q")
+	return q if q != null and int(q[0]) == tick else null
 
 
 ## Целители сами лечат самого раненого союзника рядом, когда перезарядка готова
@@ -1325,16 +1533,21 @@ func _autocast_summon(u: Dictionary, ac: Dictionary) -> void:
 		spot = corpses[c]["pos"]
 		_remove_corpse(c, "raised")
 	u["cds"]["auto"] = tick + int(float(ac.get("cooldown", 12.0)) * TICK_RATE)
-	var id := spawn_unit(player, key, def, spot, false)
-	units[id]["expires"] = tick + int(float(ac.get("duration", 40.0)) * TICK_RATE)
-	units[id]["camp"] = -1
-	alive.append(id)
+	var target := int(u["order"].get("target", foe))
+	var n := mini(int(ac.get("count", 1)), int(ac.get("max", 2)) - alive.size())      # дракон зовёт нескольких сразу
+	for k in n:
+		var at: Vector2 = spot if k == 0 else (u["pos"] as Vector2) + (u["facing"] as Vector2).rotated(0.9 * (k - 1) - 0.45 + PI * 0.25 * k) * (float(u["radius"]) + 1.2)
+		if is_blocked(to_cell(at)):
+			at = cell_center(nearest_free_cell(to_cell(at)))
+		var id := spawn_unit(player, key, def, at, false)
+		units[id]["expires"] = tick + int(float(ac.get("duration", 40.0)) * TICK_RATE)
+		units[id]["camp"] = -1
+		alive.append(id)
+		events.append({"type": "blast", "pos": at, "radius": 1.2, "color": String(ac.get("color", "#6aff8a"))})
+		if entity(target) != null and enemies(int(entity(target)["player"]), player):
+			_order_attack(units[id], target, {})
 	u["raised"] = alive
 	events.append({"type": "cast", "id": u["id"], "key": "autocast"})
-	events.append({"type": "blast", "pos": spot, "radius": 1.2, "color": String(ac.get("color", "#6aff8a"))})
-	var target := int(u["order"].get("target", foe))
-	if entity(target) != null and enemies(int(entity(target)["player"]), player):
-		_order_attack(units[id], target, {})
 
 
 func _idle(u: Dictionary) -> void:
@@ -1366,15 +1579,27 @@ func _auto_acquire(u: Dictionary, o: Dictionary) -> bool:
 			u["order"] = {"type": "home"}
 			_path_to(u, u["home"])
 		return false
-	if (is_worker(u) and not _has_buff(u, "militia")) or float(u["damage"]) <= 0.0 or (tick + int(u["id"])) % 3 != 0:
+	if not _may_acquire(u):
 		return false
-	if u.get("hidden", false):
-		return false      # укрывшийся эльф сам не нападает — сидит в засаде, ждёт приказа
-	var best := _nearest_enemy(u["pos"], int(u["player"]), ACQUIRE, true)
+	var best := -1
+	var q = _ready_q(u)
+	if q != null and int(q[1]) >= -1 and (int(q[1]) < 0 or entity(int(q[1])) != null):
+		best = int(q[1])      # ответ, найденный заранее на другом ядре, ещё верен
+	else:
+		best = _nearest_enemy(u["pos"], int(u["player"]), ACQUIRE, true)
 	if best < 0:
 		return false
 	_order_attack(u, best, o if String(o.get("type")) == "amove" else {})
 	return true
+
+
+## Ищет ли боец сам цель в этот тик (раз в 3 тика; рабочие — только в ополчении; укрывшиеся — нет).
+func _may_acquire(u: Dictionary) -> bool:
+	if int(u["player"]) == NEUTRAL and not u.get("raider", false):
+		return false
+	if (is_worker(u) and not _has_buff(u, "militia")) or float(u["damage"]) <= 0.0 or (tick + int(u["id"])) % 3 != 0:
+		return false
+	return not u.get("hidden", false)      # укрывшийся эльф сам не нападает — сидит в засаде, ждёт приказа
 
 
 func _nearest_enemy(pos: Vector2, player: int, max_dist: float, with_buildings: bool) -> int:
@@ -1492,7 +1717,8 @@ func _do_attack(u: Dictionary, o: Dictionary) -> void:
 		_go_adjacent(u, _rect(t))
 		u["chase"] = int(t["id"])      # ставится после прокладки пути: любой другой путь (_path_to) его стирает
 	else:
-		var spot := _attack_spot(u, t)
+		var q = _ready_q(u)
+		var spot: Vector2 = q[3] if q != null and int(q[2]) == int(t["id"]) else _attack_spot(u, t)
 		if same and spot.distance_to(u.get("chase_at", Vector2(-99, -99))) < maxf(0.8, (u["pos"] as Vector2).distance_to(spot) * 0.15):
 			return
 		_path_to(u, spot)
@@ -1558,13 +1784,15 @@ func _strike(u: Dictionary) -> void:
 		if splash_r > 0.0:       # осадные машины бьют по площади
 			projectiles[pid]["splash"] = float(u["def"].get("splash", 0.5))
 			projectiles[pid]["splash_radius"] = splash_r
+			projectiles[pid]["art"] = int(u["player"]) != NEUTRAL
 	else:
 		var tpos: Vector2 = t["pos"]
 		_damage(t, dmg, String(u["damage_type"]), int(u["id"]), int(u["player"]), true)
 		if splash_r > 0.0:
-			for oid in _units_near(tpos, splash_r):
-				if units.has(oid) and oid != int(t["id"]) and enemies(int(units[oid]["player"]), int(u["player"])):
-					_damage(units[oid], dmg * float(u["def"].get("splash", 0.5)), String(u["damage_type"]), int(u["id"]), int(u["player"]))
+			var art: bool = int(u["player"]) != NEUTRAL
+			for oid in _splash_hits(tpos, splash_r, int(u["player"]), int(t["id"]), art):
+				if units.has(oid):      # мог погибнуть от взрыва соседа
+					_damage(units[oid], dmg * float(u["def"].get("splash", 0.5)) * (SPLASH_MUL if art else 1.0), String(u["damage_type"]), int(u["id"]), int(u["player"]))
 
 
 ## attack = обычная атака (её можно уклониться, она даёт вампиризм); заклинания — нет.
@@ -1598,13 +1826,34 @@ func _fly(p: Dictionary) -> void:
 		if t != null:
 			_damage(t, float(p["damage"]), String(p["damage_type"]), int(p["attacker"]), int(p["player"]), bool(p.get("attack", false)))
 		if float(p["splash_radius"]) > 0.0:   # взрыв задевает врагов рядом с целью
-			for oid in _units_near(p["tpos"], float(p["splash_radius"])):
-				if oid != int(p["target"]) and units.has(oid) and enemies(int(units[oid]["player"]), int(p["player"])):
-					_damage(units[oid], float(p["damage"]) * float(p["splash"]), String(p["damage_type"]), int(p["attacker"]), int(p["player"]))
+			var art: bool = p.get("art", false)      # выстрел осадного орудия игрока — по площади слабее и не по всем
+			for oid in _splash_hits(p["tpos"], float(p["splash_radius"]), int(p["player"]), int(p["target"]), art):
+				if units.has(oid):
+					_damage(units[oid], float(p["damage"]) * float(p["splash"]) * (SPLASH_MUL if art else 1.0), String(p["damage_type"]), int(p["attacker"]), int(p["player"]))
 			events.append({"type": "blast", "pos": p["tpos"], "radius": p["splash_radius"], "color": "#ff7a2a"})
 		projectiles.erase(p["id"])
 	else:
 		p["pos"] = (p["pos"] as Vector2) + to.normalized() * step_len
+
+
+## Урон по площади у войск игроков: слабее (SPLASH_MUL) и задевает не больше SPLASH_MAX ближайших врагов —
+## иначе толпа катапульт сносит любое войско. Нейтралов (дракона, духов) это не касается.
+const SPLASH_MUL := 0.6
+const SPLASH_MAX := 4
+
+
+func _splash_hits(center: Vector2, radius: float, player: int, skip: int, capped: bool) -> Array:
+	var hits: Array = []
+	for oid in _units_near(center, radius):
+		if oid != skip and units.has(oid) and enemies(int(units[oid]["player"]), player):
+			hits.append([(units[oid]["pos"] as Vector2).distance_squared_to(center), int(oid)])
+	if capped and hits.size() > SPLASH_MAX:
+		hits.sort_custom(func(a, b) -> bool: return a[0] < b[0] or (a[0] == b[0] and a[1] < b[1]))
+		hits.resize(SPLASH_MAX)
+	var out: Array = []
+	for h in hits:
+		out.append(h[1])
+	return out
 
 
 func _damage(t: Dictionary, amount: float, dtype: String, attacker: int, attacker_player: int, attack := false) -> void:
@@ -1747,6 +1996,36 @@ func _kill(t: Dictionary, killer_player: int) -> void:
 		events.append({"type": "bounty", "player": killer_player, "amount": bounty, "pos": t["pos"]})
 
 
+## ---------- усиления игрока (действуют на всех его юнитов; видны справа на экране) ----------
+const PBUFFS := {
+	"dragon_gold": {"name": "Драконье золото", "desc": "Победа над красным драконом: рабочие добывают на 15% больше золота и дерева.", "icon": "coin", "color": "#ffb03a", "gather": 0.15, "time": 480},
+}
+
+
+func add_pbuff(player: int, key: String) -> void:
+	var list: Array = players[player].get("pbuffs", [])
+	list = list.filter(func(b) -> bool: return String(b["key"]) != key)
+	list.append({"key": key, "until": tick + int(float(PBUFFS[key]["time"]) * TICK_RATE)})
+	players[player]["pbuffs"] = list
+
+
+## Действующие усиления игрока: [{key, until}] (истёкшие отбрасываются).
+func pbuffs(player: int) -> Array:
+	var out: Array = []
+	for b in players[player].get("pbuffs", []):
+		if int(b["until"]) < 0 or tick < int(b["until"]):
+			out.append(b)
+	return out
+
+
+## Во сколько раз больше приносят рабочие игрока.
+func gather_mul(player: int) -> float:
+	var m := 1.0
+	for b in pbuffs(player):
+		m += float(PBUFFS[String(b["key"])].get("gather", 0.0))
+	return m
+
+
 ## Босс повержен: игрок, нанёсший ему больше всего урона, получает «Силу дракона»
 ## для всех своих героев — нынешних и будущих.
 func _boss_slain(t: Dictionary) -> void:
@@ -1762,10 +2041,11 @@ func _boss_slain(t: Dictionary) -> void:
 	if best < 0:
 		return
 	players[best]["dragon_buff"] = true
+	add_pbuff(best, "dragon_gold")      # и рабочие победителя какое-то время добывают больше
 	events.append({"type": "boss_slain", "player": best, "name": t["def"]["name"], "pos": t["pos"]})
 	for p in players:
 		if int(p) != NEUTRAL:
-			_msg(int(p), "%s повержен! Больше всего урона нанёс игрок %d — его герои получают «Силу дракона»" % [t["def"]["name"], best + 1])
+			_msg(int(p), "%s повержен! Больше всего урона нанёс игрок %d — его герои получают «Силу дракона», а рабочие — «Драконье золото»" % [t["def"]["name"], best + 1])
 
 
 ## Таблица юнита-нейтрала, усиленная множителем (для поздних лагерей).
@@ -2428,7 +2708,7 @@ func _cmd_hire(cmd: Dictionary) -> void:
 		_msg(player, "Подведите к лагерю наёмников любого своего юнита")
 	elif int(b["stock"].get(key, 0)) <= 0:
 		_msg(player, "%s закончились — ждите пополнения" % String(def["name"]))
-	elif int(players[player]["supply_used"]) + int(def.get("supply", 2)) > int(players[player]["supply_cap"]):
+	elif int(players[player]["supply_used"]) + int(def.get("supply", 2)) > supply_max(player):
 		_msg(player, "Не хватает лимита")
 	elif not can_afford(player, offer):
 		_msg(player, "Не хватает золота")
@@ -2454,6 +2734,8 @@ func _cmd_hire(cmd: Dictionary) -> void:
 # ---------- способности героев, усиления, ауры ----------
 
 var _auras: Array = []
+var _aura_self: Dictionary = {}    # у кого из юнитов есть личные бонусы (id -> true)
+var _aura_area: Array = []          # ауры по площади: [центр, радиус, игрок]
 var _up_ver: Dictionary = {}      # игрок -> сколько раз менялись его улучшения (для быстрого пути _refresh_stats)
 
 
@@ -2476,6 +2758,8 @@ func _units_near(pos: Vector2, radius: float) -> Array:
 ## Раз в тик собираем пассивные способности героев: ауры и личные бонусы.
 func _collect_auras(ids: Array) -> void:
 	_auras.clear()
+	_aura_self.clear()
+	_aura_area.clear()
 	for id in ids:
 		var u: Dictionary = units[id]
 		if u["def"].has("aura") and not u.has("merc_idle"):      # аура обычного юнита (знаменосец)
@@ -2490,6 +2774,11 @@ func _collect_auras(ids: Array) -> void:
 				_auras.append({"player": u["player"], "pos": u["pos"], "radius": float(ab["aura"]["radius"]), "mods": scaled_mods(ab["aura"]["mods"], r), "only": -1})
 			if ab.has("self_mods"):
 				_auras.append({"player": u["player"], "pos": u["pos"], "radius": 0.0, "mods": scaled_mods(ab["self_mods"], r), "only": int(id)})
+	for a in _auras:      # для быстрой проверки «действует ли на юнита хоть что-то»
+		if int(a["only"]) >= 0:
+			_aura_self[int(a["only"])] = true
+		else:
+			_aura_area.append([a["pos"], float(a["radius"]), int(a["player"])])
 
 
 ## Текущие характеристики = базовые + временные усиления + ауры + предметы.
@@ -2502,12 +2791,11 @@ func _refresh_stats(u: Dictionary) -> void:
 	# изменилось с прошлого раза — пересчитывать нечего. Так большинство юнитов в тик почти ничего не стоят.
 	var dyn: bool = not (u["buffs"] as Array).is_empty() or not (u["items"] as Array).is_empty()
 	if not dyn:
-		for a in _auras:
-			if int(a["only"]) >= 0:
-				if int(a["only"]) == int(u["id"]):
-					dyn = true
-					break
-			elif (a["pos"] as Vector2).distance_to(u["pos"]) <= float(a["radius"]) and not enemies(int(a["player"]), int(u["player"])):
+		dyn = _aura_self.has(int(u["id"]))
+	if not dyn:
+		var up: Vector2 = u["pos"]
+		for a in _aura_area:
+			if (a[0] as Vector2).distance_squared_to(up) <= float(a[1]) * float(a[1]) and not enemies(int(a[2]), int(u["player"])):
 				dyn = true
 				break
 	var dug: bool = int(u.get("still", 0)) >= ENTRENCH_TICKS and has_trait(u, "entrench") and float(u["base"]["speed"]) > 0.0
@@ -3038,8 +3326,9 @@ func _cmd_cancel(cmd: Dictionary) -> void:
 		if mine <= 1:
 			_msg(player, "Нельзя отменить единственное здание")
 			return
-		p["gold"] += int(b["def"]["cost"].get("gold", 0)) * 3 / 4
-		p["wood"] += int(b["def"]["cost"].get("wood", 0)) * 3 / 4
+		var paid: Dictionary = b.get("paid", b["def"]["cost"])
+		p["gold"] += int(paid.get("gold", 0)) * 3 / 4
+		p["wood"] += int(paid.get("wood", 0)) * 3 / 4
 		_set_solid(_rect(b), false)
 		buildings.erase(b["id"])
 		_bindex_dirty = true
@@ -3274,6 +3563,37 @@ func _cmd_research(cmd: Dictionary) -> void:
 	(b["queue"] as Array).append({"key": key, "research": true, "left": time, "total": time, "hero": false, "revive": false})
 
 
+## Предел пищи: фермы дают сколько угодно, но больше SUPPLY_LIMIT не засчитывается;
+## улучшение «granary» в главном здании поднимает предел до 200 и 300.
+const SUPPLY_LIMIT := 100
+const SUPPLY_TOP := 300
+
+
+func supply_limit(player: int) -> int:
+	return mini(SUPPLY_TOP, SUPPLY_LIMIT + 100 * int(players[player]["upgrades"].get("granary", 0)))
+
+
+## Улучшение «Большие амбары» в главном здании любой расы (поднимает предел пищи).
+static func add_granary(race: Dictionary) -> void:
+	if not race.has("upgrades") or not race.get("buildings", {}).has("hall") or race["upgrades"].has("granary"):
+		return
+	race["upgrades"]["granary"] = {
+		"name": "Большие амбары", "hotkey": "G", "icon": "house", "color": "#d8b46a", "max": 2,
+		"cost": {"gold": 450, "wood": 300}, "costs": [{"gold": 450, "wood": 300}, {"gold": 900, "wood": 650}],
+		"time": 60, "times": [60, 90], "mods": {},
+		"description": "Предел пищи: 100 → 200 (1-й уровень) → 300 (2-й уровень). Сами фермы по-прежнему нужны — амбары лишь позволяют держать войско больше.",
+	}
+	var hall: Dictionary = race["buildings"]["hall"]
+	var list: Array = (hall.get("researches", []) as Array).duplicate()
+	list.append("granary")
+	hall["researches"] = list
+
+
+## Сколько пищи доступно игроку на деле (фермы, но не больше предела).
+func supply_max(player: int) -> int:
+	return mini(int(players[player]["supply_cap"]), supply_limit(player))
+
+
 ## Уровень главного здания игрока: 1 в начале, растёт улучшением «tier» в ратуше (до 3).
 func tier(player: int) -> int:
 	return 1 + int(players[player]["upgrades"].get("tier", 0))
@@ -3403,7 +3723,12 @@ func _do_return(u: Dictionary, o: Dictionary) -> void:
 	var rect := _rect(buildings[hall])
 	if _near(u, rect):
 		var rush := 1.5 if String(u["carry_kind"]) == "gold" and tick < int(world.get("gold_rush", 0)) else 1.0      # золотая лихорадка
-		var gained: int = int(round(int(u["carry"]) * float(players[u["player"]].get("income_mul", 1.0)) * rush))
+		var kind := String(u["carry_kind"])
+		var pl: Dictionary = players[u["player"]]
+		# дробная часть не теряется: копится у игрока и добавляется к следующей ноше
+		var exact: float = int(u["carry"]) * float(pl.get("income_mul", 1.0)) * rush * gather_mul(int(u["player"])) + float(pl.get("frac_" + kind, 0.0))
+		var gained: int = int(floor(exact + 0.0001))
+		pl["frac_" + kind] = maxf(0.0, exact - gained)
 		players[u["player"]][String(u["carry_kind"])] += gained
 		players[u["player"]]["stats"][String(u["carry_kind"])] += gained
 		u["carry"] = 0
@@ -3558,7 +3883,8 @@ func _path_to(u: Dictionary, dest: Vector2) -> void:
 
 ## Свободна ли прямая между точками для юнита (проверяются клетки вдоль линии и по её бокам).
 func _clear_line(a: Vector2, b: Vector2, r: float, swim := false) -> bool:
-	var g := _grid_for(swim)
+	var g: PackedByteArray = _solid_sw if swim else _solid
+	var w := map_size
 	var d := b - a
 	var length := d.length()
 	if length < 0.01:
@@ -3567,7 +3893,10 @@ func _clear_line(a: Vector2, b: Vector2, r: float, swim := false) -> bool:
 	var side := Vector2(-d.y, d.x) / length * r
 	for k in range(1, n + 1):
 		var p := a + d * (float(k) / n)
-		if g.is_point_solid(to_cell(p)) or g.is_point_solid(to_cell(p + side)) or g.is_point_solid(to_cell(p - side)):
+		var c0 := to_cell(p)
+		var c1 := to_cell(p + side)
+		var c2 := to_cell(p - side)
+		if g[c0.y * w + c0.x] != 0 or g[c1.y * w + c1.x] != 0 or g[c2.y * w + c2.x] != 0:
 			return false
 	return true
 
@@ -3624,7 +3953,11 @@ func cell_center(c: Vector2i) -> Vector2:
 
 
 func is_blocked(c: Vector2i, swim := false) -> bool:
-	return not in_map(c) or _grid_for(swim).is_point_solid(c)
+	if not in_map(c):
+		return true
+	if swim:
+		return _solid_sw[c.y * map_size + c.x] != 0
+	return _solid[c.y * map_size + c.x] != 0
 
 
 func nearest_free_cell(c: Vector2i, taken: Dictionary = {}, swim := false) -> Vector2i:

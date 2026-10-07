@@ -1,4 +1,4 @@
-﻿extends Node3D
+extends Node3D
 ## Всё, что видит и нажимает игрок: меню, камера, выделение, приказы, интерфейс.
 ## Сама игра считается в Sim (scripts/sim.gd); здесь её только показывают.
 
@@ -53,6 +53,9 @@ var map_choice := 96              # сторона карты: 96, 192 (×4) и�
 var selected: Array = []          # выбранные свои юниты
 var sel_building := -1            # или одно выбранное здание
 var inspect := -1                 # или чужой юнит, которого просто рассматривают
+var sel_res := -1                 # или золотой рудник (показывает, сколько в нём осталось)
+var sel_group: Array = []         # одинаковые свои здания, выбранные двойным щелчком (первое — sel_building)
+var _group_rings: Array = []      # кольца выделения вокруг остальных зданий группы
 var views: Dictionary = {}        # id юнита -> {node, parts, ring, ...}
 var bviews: Dictionary = {}       # id здания -> Node3D
 var rviews: Dictionary = {}       # id ресурса -> Node3D (рудники и «вынутые» из пачек деревья)
@@ -67,6 +70,12 @@ var floaters: Array = []          # всплывающие надписи «+30�
 var _acc := 0.0
 var _time := 0.0
 var _paused := false
+# Тик симуляции считается на другом ядре, пока это ядро рисует кадр (см. _sim_kick / _sim_join).
+var _threaded := true
+var _step_queued := false         # тик назначен на этот кадр: стартует, когда кадр уйдёт на отрисовку
+var _step_task := -1              # номер задачи в пуле потоков (-1 — фоном ничего не считается)
+var _step_us := 0                 # сколько длился фоновый тик (для --prof)
+var _kick_us := 0
 var _rig: Node3D
 var _cam: Camera3D
 var _zoom := 19.0
@@ -162,8 +171,15 @@ var _env: Environment
 var _clock_label: Label           # время партии и день/ночь
 var _day_icon: TextureRect
 var _res_labels: Dictionary = {}  # gold / wood / supply -> Label
+var _pbuff_box: VBoxContainer      # усиления игрока справа
+var _pbuff_key := ""
 var _shown_res := {"gold": -1, "wood": -1}
 var runeviews: Dictionary = {}    # id руны -> Node3D
+
+
+## Ввод приходит раньше всех: интерфейс и клики читают симуляцию — сперва дождёмся фонового тика.
+func _input(_event: InputEvent) -> void:
+	_sim_join()
 
 
 func _notification(what: int) -> void:
@@ -195,6 +211,10 @@ func _ready() -> void:
 		_start_server.call_deferred()
 		return
 	_load_settings()
+	_threaded = not _test.has("nothread") and OS.get_processor_count() > 1
+	RenderingServer.frame_pre_draw.connect(_sim_kick)
+	get_tree().process_frame.connect(_sim_join)      # до таймеров, анимаций и чужих _process
+	get_tree().physics_frame.connect(_sim_join)
 	_online_signals()
 	if _test.has("autonet"):
 		_autonet_begin()
@@ -220,6 +240,13 @@ func _start_server() -> void:
 
 ## Сцена уходит (выход в меню): отцепляемся от сетевых сигналов, которые переживут нас.
 func _exit_tree() -> void:
+	Models.crests.clear()
+	if _step_task >= 0:      # фоновый тик должен закончиться раньше, чем исчезнет его симуляция
+		WorkerThreadPool.wait_for_task_completion(_step_task)
+		_step_task = -1
+	_step_queued = false
+	if RenderingServer.frame_pre_draw.is_connected(_sim_kick):
+		RenderingServer.frame_pre_draw.disconnect(_sim_kick)
 	Models.clear_cache()
 	for src in [online, multiplayer]:
 		if src == null:
@@ -245,6 +272,8 @@ func _load_data() -> void:
 			var race := _read_json("res://data/races/" + f)
 			if race.has("id"):
 				races[String(race["id"])] = race
+	for rid in races:
+		Sim.add_granary(races[rid])      # амбары в главном здании — у всех рас
 	neutral = _read_json("res://data/neutral.json")
 	combat = _read_json("res://data/combat.json")
 	for rid in races:      # справочник для иконок эффектов: от какой способности или предмета эффект
@@ -836,7 +865,7 @@ func _settings_box(parent: Control) -> void:
 	parent.add_child(_toggle_row(qopts, String(settings.get("quality", "high")), func(v) -> void:
 		settings["quality"] = String(v)
 		_apply_settings(), 340.0, 15))
-	parent.add_child(_note_label("Среднее — тени проще, травы вдвое меньше. Низкое — без теней, травы и свечения, для слабых компьютеров."))
+	parent.add_child(_note_label("Среднее — тени проще, травы вдвое меньше, модели чуть проще. Низкое — без теней, травы и свечения, модели угловатые, для слабых компьютеров. Подробность моделей меняется с новой партии."))
 	var vl := Label.new()
 	vl.text = "Громкость звука: %d" % int(settings["volume"])
 	vl.add_theme_font_size_override("font_size", 20)
@@ -1142,7 +1171,53 @@ func _center() -> Vector2:
 	return Vector2(sim.map_size, sim.map_size) * 0.5
 
 
+## Гербы игроков: деление щита и знак у каждого свои (на одной карте не повторяются),
+## металл — случайный. Зависят только от зерна карты — у всех участников сетевой игры одинаковые.
+func _deal_crests() -> void:
+	Models.crests.clear()
+	var rng := RandomNumberGenerator.new()
+	rng.seed = sim.seed_value * 7 + 13
+	var divs: Array = range(Models.CREST_DIVS.size())
+	var charges: Array = range(Models.CREST_CHARGES.size())
+	for arr in [divs, charges]:      # перемешиваем своим генератором (общий у каждого компьютера свой)
+		for i in range(arr.size() - 1, 0, -1):
+			var j := rng.randi_range(0, i)
+			var tmp = arr[i]
+			arr[i] = arr[j]
+			arr[j] = tmp
+	var ids: Array = sim.players.keys()
+	ids.sort()
+	var n := 0
+	for p in ids:
+		if int(p) == Sim.NEUTRAL:
+			continue
+		Models.crests[_team(int(p)).to_html()] = {"div": divs[n % divs.size()], "charge": charges[n % charges.size()], "metal": Models.CREST_METALS[rng.randi() % Models.CREST_METALS.size()]}
+		n += 1
+
+
+var _gold_ids: Array = []          # рудники карты (новые по ходу игры не появляются)
+var _res_cell: Dictionary = {}     # клетка -> ресурс на ней (для поиска под курсором)
+
+
+func _index_resources() -> void:
+	_gold_ids.clear()
+	_res_cell.clear()
+	for id in sim.resources:
+		var r: Dictionary = sim.resources[id]
+		if String(r["kind"]) == "gold":
+			_gold_ids.append(int(id))
+		for x in int(r["size"]):
+			for y in int(r["size"]):
+				_res_cell[Vector2i(r["cell"]) + Vector2i(x, y)] = int(id)
+
+
 func _build_world() -> void:
+	_index_resources()
+	# ядра для тика: одно остаётся рисованию, остальные (не больше 6) — симуляции
+	sim.threads = 1 if not _threaded else clampi(int(_test.get("threads", OS.get_processor_count() - 1)), 1, 6)
+	_deal_crests()
+	var q := String(settings.get("quality", "high"))      # подробность моделей — по качеству графики
+	Models.detail = int(_test.get("detail", 2 if q == "high" else (1 if q == "medium" else 0)))
 	Models.foliage = String(terrain.B.get("foliage", ""))      # листва деревьев по местности
 	var taken: Dictionary = {}   # клетки под деревьями, рудниками и зданиями: там не растут цветы
 	for group in [sim.resources, sim.buildings]:
@@ -1380,6 +1455,70 @@ func _make_building_view(b: Dictionary) -> void:
 
 
 var _blob_mesh: PlaneMesh       # мягкое пятно тени под ногами (одно на всех)
+var _glow_mats: Dictionary = {}   # цвет игрока -> [материал пятна, материал столба] свечения героев
+
+const GLOW_SPOT := """
+shader_type spatial;
+render_mode unshaded, blend_add, depth_draw_never, cull_disabled, shadows_disabled;
+uniform vec4 col : source_color;
+void fragment() {
+	float d = length(UV - vec2(0.5)) * 2.0;
+	ALBEDO = col.rgb;
+	ALPHA = smoothstep(1.0, 0.2, d) * col.a * (0.82 + 0.18 * sin(TIME * 2.4));
+}
+"""
+const GLOW_PILLAR := """
+shader_type spatial;
+render_mode unshaded, blend_add, depth_draw_never, cull_disabled, shadows_disabled;
+uniform vec4 col : source_color;
+varying float h;
+void vertex() { h = clamp(VERTEX.y + 0.5, 0.0, 1.0); }
+void fragment() {
+	float edge = 1.0 - abs(dot(NORMAL, VIEW));
+	ALBEDO = col.rgb;
+	ALPHA = pow(1.0 - h, 1.6) * (0.35 + 0.65 * edge) * col.a * (0.85 + 0.15 * sin(TIME * 2.4 + 1.0));
+}
+"""
+
+
+## Свечение героя цветом его игрока: мягкое пятно света на земле и прозрачный столб света,
+## тающий кверху, — героя видно и в густой толпе. Возвращает узлы (их убирают при гибели).
+func _hero_glow(node: Node3D, r: float, height: float, team: Color) -> Array:
+	var key := team.to_html()
+	if not _glow_mats.has(key):
+		var mats: Array = []
+		for code in [GLOW_SPOT, GLOW_PILLAR]:
+			var sh := Shader.new()
+			sh.code = code
+			var m := ShaderMaterial.new()
+			m.shader = sh
+			m.set_shader_parameter("col", Color(team.r, team.g, team.b, 0.9 if code == GLOW_SPOT else 0.5))
+			mats.append(m)
+		_glow_mats[key] = mats
+	var spot := MeshInstance3D.new()
+	var pm := PlaneMesh.new()
+	pm.size = Vector2.ONE * (r * 2.0 + 1.5)
+	spot.mesh = pm
+	spot.position.y = 0.06
+	spot.material_override = _glow_mats[key][0]
+	spot.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	node.add_child(spot)
+	var pillar := MeshInstance3D.new()
+	var cm := CylinderMesh.new()
+	cm.top_radius = r + 0.32
+	cm.bottom_radius = r + 0.26
+	cm.height = 1.0
+	cm.cap_top = false
+	cm.cap_bottom = false
+	cm.radial_segments = 20
+	cm.rings = 1
+	pillar.mesh = cm
+	pillar.scale = Vector3(1.0, maxf(1.2, height * 0.85), 1.0)
+	pillar.position.y = pillar.scale.y * 0.5
+	pillar.material_override = _glow_mats[key][1]
+	pillar.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	node.add_child(pillar)
+	return [spot, pillar]
 
 
 ## Мягкая тень-пятно под юнитом: «сажает» его на землю (особенно без настоящих теней).
@@ -1439,6 +1578,8 @@ func _make_unit_view(u: Dictionary) -> void:
 		"phase": float(int(u["id"]) % 7), "walk": 0.0, "atk_t": -1.0, "atk_len": 0.6,
 		"hp": u["hp"],
 	}
+	if u["hero"] and int(u["player"]) != Sim.NEUTRAL:
+		views[u["id"]]["glow"] = _hero_glow(node, r, float(node.get_meta("parts")["height"]), _team(int(u["player"])))
 
 
 # =====================================================================
@@ -1506,7 +1647,7 @@ func _build_hud() -> void:
 		var l := Label.new()
 		_outlined(l, 21)
 		l.custom_minimum_size = Vector2(78 if spec[2] == "supply" else 64, 0)
-		l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		l.mouse_filter = Control.MOUSE_FILTER_PASS if spec[2] == "supply" else Control.MOUSE_FILTER_IGNORE      # у пищи — подсказка о пределе
 		rrow.add_child(l)
 		_res_labels[spec[2]] = l
 	_res = _res_labels["gold"]
@@ -1542,6 +1683,14 @@ func _build_hud() -> void:
 	_fps.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_outlined(_fps, 17)
 	_ui.add_child(_fps)
+	# усиления игрока (за дракона, золотая лихорадка…): столбик значков справа под ресурсами
+	_pbuff_box = VBoxContainer.new()
+	_pbuff_box.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	_pbuff_box.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	_pbuff_box.position = Vector2(-16, 112)
+	_pbuff_box.add_theme_constant_override("separation", 6)
+	_pbuff_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_ui.add_child(_pbuff_box)
 
 	_hint = Label.new()
 	_hint.set_anchors_preset(Control.PRESET_CENTER_TOP)
@@ -1848,9 +1997,9 @@ func _draw_mini() -> void:
 	if _mini_dirty:
 		_bake_mini()
 	_mini.draw_texture_rect(_mini_tex, Rect2(Vector2.ZERO, Vector2(MINI_SIZE, MINI_SIZE)), false)
-	for id in sim.resources:      # рудник — яркая золотая монета с тёмным ободком: ни с чем не спутать
-		var r: Dictionary = sim.resources[id]
-		if String(r["kind"]) == "gold":
+	for id in _gold_ids:      # рудник — яркая золотая монета с тёмным ободком: ни с чем не спутать
+		var r = sim.resources.get(id)
+		if r != null:
 			_mini_mark((r["pos"] as Vector2) * k, "mine", Color("#ffcc1a"), Color(0.12, 0.08, 0.0))
 	for id in sim.buildings:
 		var b: Dictionary = sim.buildings[id]
@@ -1911,9 +2060,9 @@ func _mini_hint(at: Vector2) -> String:
 	var k := MINI_SIZE / sim.map_size
 	var best := ""
 	var best_d := 7.0
-	for id in sim.resources:
-		var r: Dictionary = sim.resources[id]
-		if String(r["kind"]) == "gold" and ((r["pos"] as Vector2) * k).distance_to(at) < best_d:
+	for id in _gold_ids:
+		var r = sim.resources.get(id)
+		if r != null and ((r["pos"] as Vector2) * k).distance_to(at) < best_d:
 			best_d = ((r["pos"] as Vector2) * k).distance_to(at)
 			best = "%s: %d золота" % [MINI_NAMES["mine"], int(r["amount"])]
 	for id in sim.buildings:
@@ -2166,7 +2315,7 @@ func _update_hints() -> void:
 		text = "У героя есть очко навыка. Выберите героя и нажмите зелёный «+» на кнопке способности (или Ctrl + её клавиша). Новые способности открываются с ростом уровня, сильнейшая — на 6-м."
 	elif gathering < 3 and sim.tick < 1200:
 		text = "Выделите рабочих рамкой (зажмите левую кнопку мыши и потяните) и нажмите правой кнопкой по золотому руднику или дереву. Они начнут добычу."
-	elif not has.has("supply") and int(p["supply_cap"]) - int(p["supply_used"]) < 6:
+	elif not has.has("supply") and sim.supply_max(local_player) - int(p["supply_used"]) < 6 and int(p["supply_cap"]) < sim.supply_limit(local_player):
 		text = "Выберите рабочего и постройте «%s» (кнопки справа внизу, клавиша %s): это увеличит лимит армии." % [names["supply"]["name"], names["supply"]["hotkey"]]
 	elif not has.has("barracks"):
 		text = "Постройте «%s» (клавиша %s у рабочего). Потом щёлкните по готовому зданию, чтобы нанимать в нём войска." % [names["barracks"]["name"], names["barracks"]["hotkey"]]
@@ -2340,8 +2489,8 @@ func _traits(def: Dictionary) -> Array:
 	return out
 
 
-func _building_tip(def: Dictionary) -> String:
-	var text := "%s   [%s]\n%s\nПрочность %d" % [def["name"], def.get("hotkey", ""), _cost_text(def.get("cost", {})), int(def["hp"])]
+func _building_tip(def: Dictionary, cost = null) -> String:
+	var text := "%s   [%s]\n%s\nПрочность %d" % [def["name"], def.get("hotkey", ""), _cost_text(def.get("cost", {}) if cost == null else cost), int(def["hp"])]
 	if def.has("supply_given"):
 		text += "   Лимит +%d" % int(def["supply_given"])
 	if def.has("damage"):
@@ -2461,6 +2610,8 @@ func _subject() -> Dictionary:
 		return {"kind": "building", "id": sel_building}
 	if inspect >= 0 and sim.units.has(inspect):
 		return {"kind": "unit", "id": inspect}
+	if sel_res >= 0 and sim.resources.has(sel_res):
+		return {"kind": "resource", "id": sel_res}
 	return {"kind": "none", "id": -1}
 
 
@@ -2470,9 +2621,11 @@ func _update_stats() -> void:
 	_stat_extra.text = ""
 	var chips: Array = []
 	var fx: Array = []
-	_bag.visible = false
-	_xp_bar.visible = false
-	_mana_bar.visible = false
+	# видимость меняем только при настоящей смене: прятать и сразу показывать каждый кадр нельзя —
+	# спрятанная ячейка сумки теряет наведение мыши, и подсказка о предмете тут же гаснет
+	var bag_on := false
+	var xp_on := false
+	var mana_on := false
 	if String(s["kind"]) == "unit":
 		var u: Dictionary = sim.units[s["id"]]
 		var d: Dictionary = u["def"]
@@ -2490,16 +2643,16 @@ func _update_stats() -> void:
 		var hr := float(u["hp"]) / float(u["max_hp"])
 		_hp_bar.set_value(hr, "%d / %d" % [ceili(float(u["hp"])), int(u["max_hp"])], _hp_color(hr))
 		if float(u["max_mana"]) > 0.0:
-			_mana_bar.visible = true
+			mana_on = true
 			_mana_bar.set_value(float(u["mana"]) / float(u["max_mana"]), "%d / %d" % [int(u["mana"]), int(u["max_mana"])])
 		if u["hero"]:
-			_xp_bar.visible = true
+			xp_on = true
 			if int(u["level"]) >= Sim.MAX_HERO_LEVEL:
 				_xp_bar.set_value(1.0, "максимальный уровень")
 			else:
 				var need: int = sim.xp_needed(int(u["level"]))
 				_xp_bar.set_value(float(u["xp"]) / float(need), "опыт %d / %d" % [int(u["xp"]), need])
-			_bag.visible = true
+			bag_on = true
 			_update_bag(u)
 		chips = _unit_chips(u)
 		if sim.tick < int(u["stun"]):
@@ -2524,11 +2677,29 @@ func _update_stats() -> void:
 			var total: float = maxf(0.1, int(b.get("len", 1)) * Sim.TICK_DT)
 			fx.append({"key": String(b["key"]), "icon": info["icon"], "color": info["color"], "ratio": clampf(1.0 - left / total, 0.0, 1.0),
 				"tip": "%s\n%s\nОсталось %d с" % [info["name"], _mods_text(b["mods"]), ceili(left)]})
+	elif String(s["kind"]) == "resource":      # золотой рудник: сколько осталось и кто его копает
+		var r: Dictionary = sim.resources[s["id"]]
+		_portrait.texture = Icons.make("coin", Color("#f0c63a"))
+		var full := maxi(int(r.get("max", Sim.GOLD_IN_MINE)), int(r["amount"]))
+		_stat_name.text = "Золотой рудник"
+		var gr := float(r["amount"]) / float(full)
+		_hp_bar.set_value(gr, "золота %d / %d" % [int(r["amount"]), full], Color("#e8b830"))
+		var diggers := 0
+		for wid in sim.units:
+			var wo: Dictionary = sim.units[wid]["order"]
+			if int(sim.units[wid]["player"]) == local_player and int(wo.get("target", -1)) == int(s["id"]) and String(wo.get("type", "")) in ["gather", "return"]:
+				diggers += 1
+		chips.append(_chip("coin", "#f0c63a", str(int(r["amount"])), "Осталось золота в руднике"))
+		if diggers > 0:
+			chips.append(_chip("hammer", "#c9ced6", str(diggers), "Ваших рабочих добывают здесь золото"))
 	elif String(s["kind"]) == "building":
 		var b: Dictionary = sim.buildings[s["id"]]
 		var d: Dictionary = b["def"]
 		_portrait.texture = _icon("building", int(b["player"]), String(b["key"]))
 		_stat_name.text = String(d["name"])
+		var grp := _building_group().size()
+		if grp > 1:
+			_stat_name.text += "   (выбрано: %d — нанимают все сразу)" % grp
 		var hr := float(b["hp"]) / float(b["max_hp"])
 		_hp_bar.set_value(hr, "%d / %d" % [ceili(float(b["hp"])), int(b["max_hp"])], _hp_color(hr))
 		if d.has("damage"):
@@ -2582,6 +2753,12 @@ func _update_stats() -> void:
 	_set_chips(chips)
 	_set_effects(fx)
 	_update_queue(s)
+	if _bag.visible != bag_on:
+		_bag.visible = bag_on
+	if _xp_bar.visible != xp_on:
+		_xp_bar.visible = xp_on
+	if _mana_bar.visible != mana_on:
+		_mana_bar.visible = mana_on
 
 
 func _hp_color(ratio: float) -> Color:
@@ -2700,6 +2877,47 @@ func _set_chips(list: Array) -> void:
 			(c.get_child(0) as TextureRect).texture = Icons.make(String(ch["icon"]), Color(String(ch["color"])))
 			(c.get_child(1) as Label).text = String(ch["text"])
 			c.set_meta("tip", ch["tip"])
+
+
+## Усиления, действующие на всё хозяйство игрока: значок, при наведении — что это и сколько осталось.
+func _update_pbuffs() -> void:
+	var list: Array = []
+	for b in sim.pbuffs(local_player):
+		var d: Dictionary = Sim.PBUFFS[String(b["key"])]
+		var left := maxi(0, int(b["until"]) - sim.tick)
+		list.append({"key": String(b["key"]), "icon": d["icon"], "color": d["color"], "left": left, "total": int(float(d["time"]) * Sim.TICK_RATE),
+			"tip": "%s\n%s\nОсталось: %s" % [d["name"], d["desc"], _clock(left * Sim.TICK_DT)]})
+	if int(sim.world.get("gold_rush", 0)) > sim.tick:
+		var gl := int(sim.world["gold_rush"]) - sim.tick
+		list.append({"key": "gold_rush", "icon": "coin", "color": "#ffe04a", "left": gl, "total": 900,
+			"tip": "Золотая лихорадка\nЗолото, которое приносят рабочие, ×1,5\nОсталось: %s" % _clock(gl * Sim.TICK_DT)})
+	if sim.players[local_player].get("dragon_buff", false):
+		list.append({"key": "dragon", "icon": "fire", "color": "#ff5a1a", "left": -1, "total": 1,
+			"tip": "Сила дракона (навсегда)\nВсе ваши герои: %s\nЗа победу над красным драконом" % _mods_text(Sim.DRAGON_MODS)})
+	var key := ""
+	for e in list:
+		key += String(e["key"]) + ","
+	if key != _pbuff_key:
+		_pbuff_key = key
+		for c in _pbuff_box.get_children():
+			_pbuff_box.remove_child(c)
+			c.queue_free()
+		for e in list:
+			var box := TextureRect.new()
+			box.custom_minimum_size = Vector2(38, 38)
+			box.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			box.texture = Icons.make(String(e["icon"]), Color(String(e["color"])))
+			box.mouse_filter = Control.MOUSE_FILTER_STOP
+			box.mouse_entered.connect(func() -> void: _show_tip(String(box.get_meta("tip", "")), box.get_global_rect()))
+			box.mouse_exited.connect(_hide_tip)
+			box.add_child(W.Sweep.new())
+			_pbuff_box.add_child(box)
+	var nodes := _pbuff_box.get_children()
+	for i in mini(nodes.size(), list.size()):
+		var box: TextureRect = nodes[i]
+		box.set_meta("tip", list[i]["tip"])
+		var e: Dictionary = list[i]
+		(box.get_child(0) as W.Sweep).ratio = 0.0 if int(e["left"]) < 0 else 1.0 - float(e["left"]) / maxf(1.0, float(e["total"]))
 
 
 ## Иконки эффектов: затемнение по кругу показывает, сколько эффекта уже прошло.
@@ -2878,7 +3096,7 @@ func _refresh_card() -> void:
 	elif sel_building >= 0 and sim.buildings.has(sel_building) and int(sim.buildings[sel_building]["player"]) == local_player:
 		key = "building:%d:%s:%s:%s:%s:%s" % [sel_building, str(sim.players[local_player]["heroes"]), str(sim.players[local_player]["upgrades"]), str(sim.players[local_player]["research_wip"]), str(sim.buildings[sel_building]["done"]), str(sim.tier3_missing(local_player))]
 	elif not _selected_workers().is_empty():
-		key = "workers:%d" % sim.tier(local_player)      # новый уровень главного здания открывает новые постройки
+		key = "workers:%d:%s:%s" % [sim.tier(local_player), str(sim.build_cost(local_player, "supply")), str(sim.build_cost(local_player, "tower"))]      # новый уровень главного здания открывает новые постройки, цены ферм и башен растут
 	if key == _card_key:
 		return
 	_card_key = key
@@ -2944,7 +3162,7 @@ func _refresh_card() -> void:
 	elif key.begins_with("workers"):
 		for bkey in data["buildings"]:
 			var def: Dictionary = data["buildings"][bkey]
-			var bitem := _add_card_button(_icon("building", local_player, String(bkey)), String(def.get("hotkey", "")), _building_tip(def), _begin_place.bind(String(bkey)), 72, def.get("cost", {}))
+			var bitem := _add_card_button(_icon("building", local_player, String(bkey)), String(def.get("hotkey", "")), _building_tip(def, sim.build_cost(local_player, String(bkey))), _begin_place.bind(String(bkey)), 72, sim.build_cost(local_player, String(bkey)))
 			if int(def.get("tier", 1)) > sim.tier(local_player):
 				(bitem["button"] as Button).modulate = Color(0.45, 0.45, 0.45)
 	elif key != "":
@@ -3093,8 +3311,23 @@ func _learn(key: String) -> void:
 
 
 func _train(unit_key: String) -> void:
-	if sel_building >= 0:
-		_issue({"type": "train", "player": local_player, "building": sel_building, "unit": unit_key})
+	for bid in _building_group():      # выбрано несколько одинаковых зданий — нанимаем в каждом
+		if sim.buildings[bid]["done"]:
+			_issue({"type": "train", "player": local_player, "building": bid, "unit": unit_key})
+
+
+## Выбранные здания: одно или группа одинаковых своих (двойной щелчок по зданию).
+func _building_group() -> Array:
+	if sel_building < 0 or not sim.buildings.has(sel_building):
+		return []
+	if sel_group.is_empty() or int(sel_group[0]) != sel_building:
+		return [sel_building]
+	var key := String(sim.buildings[sel_building]["key"])
+	var out: Array = []
+	for id in sel_group:
+		if sim.buildings.has(id) and String(sim.buildings[id]["key"]) == key and int(sim.buildings[id]["player"]) == local_player:
+			out.append(int(id))
+	return out
 
 
 ## Покупка предмета ближайшим к лавке героем.
@@ -3209,6 +3442,7 @@ func _process(delta: float) -> void:
 		if not _test.is_empty():
 			_run_test()
 		return
+	_sim_join()
 	if not _paused:
 		_time += delta
 		_acc += delta * (speed if net_mode == "" else 1.0)
@@ -3217,25 +3451,13 @@ func _process(delta: float) -> void:
 				_acc = minf(_acc, Sim.TICK_DT)      # ждём команды второго игрока
 				break
 			_acc -= Sim.TICK_DT
+			if _threaded and _acc < Sim.TICK_DT:
+				_step_queued = true      # последний тик кадра считается фоном, пока кадр рисуется
+				break
 			var p0 := Time.get_ticks_usec()
 			sim.step()
-			p0 = _pt("sim.step", p0)
-			_consume_events()
-			p0 = _pt("events", p0)
-			for ai in ais:      # каждый компьютер думает раз в секунду, но в свой тик — без общих рывков
-				if (sim.tick + int(ai.me) * 3) % 10 == 0:
-					ai.think()
-			p0 = _pt("ai", p0)
-			for wid in views:
-				var wu: Dictionary = sim.units[wid] if sim.units.has(wid) else {}
-				if not wu.is_empty() and wu["busy"] and float(wu["swing"]) < 0.0 and sim.is_worker(wu) and (sim.tick + int(wid) * 3) % 8 == 0:
-					_sfx("chop", wu["pos"], -10.0)
-					var tid = wu["order"].get("target", -1)
-					if String(wu["order"].get("type")) == "gather" and String(wu["order"].get("kind")) == "tree" and (rviews.has(tid) or _tree_slot.has(tid)):
-						var tree: Node3D = _res_node(int(tid))      # дерево вздрагивает от удара
-						var tw := create_tween()
-						tw.tween_property(tree, "rotation:z", 0.07, 0.06)
-						tw.tween_property(tree, "rotation:z", 0.0, 0.25).set_trans(Tween.TRANS_ELASTIC).set_ease(Tween.EASE_OUT)
+			_pt("sim.step", p0)
+			_after_step()
 		var p1 := Time.get_ticks_usec()
 		_update_camera(delta)
 		fog.update(sim, local_player, delta)
@@ -3257,6 +3479,70 @@ func _process(delta: float) -> void:
 			_prewarm_step()
 	if not _test.is_empty():
 		_run_test()
+
+
+## После каждого тика: картинка подхватывает события, компьютеры думают, рабочие стучат топорами.
+func _after_step() -> void:
+	var p0 := Time.get_ticks_usec()
+	_consume_events()
+	p0 = _pt("events", p0)
+	for ai in ais:      # каждый компьютер думает раз в секунду, но в свой тик — без общих рывков
+		if (sim.tick + int(ai.me) * 3) % 10 == 0:
+			ai.think()
+	p0 = _pt("ai", p0)
+	for wid in views:
+		var wu: Dictionary = sim.units[wid] if sim.units.has(wid) else {}
+		if not wu.is_empty() and wu["busy"] and float(wu["swing"]) < 0.0 and sim.is_worker(wu) and (sim.tick + int(wid) * 3) % 8 == 0:
+			_sfx("chop", wu["pos"], -10.0)
+			var tid = wu["order"].get("target", -1)
+			if String(wu["order"].get("type")) == "gather" and String(wu["order"].get("kind")) == "tree" and (rviews.has(tid) or _tree_slot.has(tid)):
+				var tree: Node3D = _res_node(int(tid))      # дерево вздрагивает от удара
+				var tw := create_tween()
+				tw.tween_property(tree, "rotation:z", 0.07, 0.06)
+				tw.tween_property(tree, "rotation:z", 0.0, 0.25).set_trans(Tween.TRANS_ELASTIC).set_ease(Tween.EASE_OUT)
+
+
+## Многоядерность. Кадр всё, что ему нужно, уже прочитал из симуляции и ушёл на отрисовку —
+## в этот момент назначенный тик запускается на другом ядре. Отрисовка (и ожидание
+## вертикальной синхронизации) идёт одновременно с расчётом тика, и кадр не «спотыкается»
+## раз в 0,1 с. Любой, кто дальше захочет прочитать симуляцию (ввод, следующий кадр),
+## сначала ждёт окончания тика в _sim_join. Тик считается тем же кодом, что и раньше,
+## поэтому сетевая игра остаётся одинаковой на всех компьютерах.
+func _sim_kick() -> void:
+	if _step_queued and _step_task < 0 and sim != null:
+		_kick_us = Time.get_ticks_usec()
+		_step_task = WorkerThreadPool.add_task(_bg_step, true, "sim tick")
+
+
+func _bg_step() -> void:
+	var t0 := Time.get_ticks_usec()
+	sim.step()
+	_step_us = Time.get_ticks_usec() - t0
+
+
+func _sim_join(_arg = null) -> void:
+	if not _step_queued:
+		return
+	var p0 := Time.get_ticks_usec()
+	if _step_task >= 0:
+		_pt("sim.window", _kick_us)
+		WorkerThreadPool.wait_for_task_completion(_step_task)
+		_step_task = -1
+		_pt("sim.wait", p0)
+		if _test.has("prof"):
+			var rec: Array = prof.get("sim.step(bg)", [0, 0])
+			prof["sim.step(bg)"] = [int(rec[0]) + _step_us, maxi(int(rec[1]), _step_us)]
+	else:      # кадр не рисовался (окно свёрнуто) — считаем тик прямо здесь
+		sim.step()
+		_pt("sim.step", p0)
+	_step_queued = false
+	_after_step()
+
+
+## Доля пути между двумя тиками для плавного движения. Пока назначенный тик ещё не посчитан,
+## картинка стоит в конце прошлого отрезка (а не прыгает назад).
+func _alpha() -> float:
+	return minf(1.0, (_acc + (Sim.TICK_DT if _step_queued else 0.0)) / Sim.TICK_DT)
 
 
 ## Замер времени частей кадра (только с ключом --prof): секция -> [сумма мкс, худший мкс].
@@ -3458,6 +3744,9 @@ func _consume_event(e: Dictionary) -> void:
 					var v: Dictionary = views[e["id"]]
 					(v["ring"] as Node3D).visible = false
 					(v["fx"] as Node3D).visible = false
+					if v.has("glow"):      # свечение героя гаснет вместе с ним
+						for gn in v["glow"]:
+							(gn as Node3D).queue_free()
 					corpses.append({"node": v["node"], "parts": v["parts"], "t": 0.0, "id": int(e["id"]), "keep": sim.corpses.has(e["id"])})
 					views.erase(e["id"])
 			"bounty":
@@ -3928,7 +4217,7 @@ func _make_rune_view(id: int) -> void:
 
 
 func _update_views(delta: float) -> void:
-	var alpha := _acc / Sim.TICK_DT
+	var alpha := _alpha()
 	var feet: Array = []
 	var eye := Vector2(_rig.position.x, _rig.position.z)
 	var far_sq := pow(28.0 + _zoom * 1.6, 2.0)      # дальше этого юнитов не видно: их не анимируем
@@ -4047,6 +4336,23 @@ func _update_views(delta: float) -> void:
 		var sb: Dictionary = sim.buildings[sel_building]
 		_sel_ring.position = _at(sb["pos"], 0.15)
 		_sel_ring.scale = Vector3(float(sb["size"]) * 0.78, 0.25, float(sb["size"]) * 0.78)
+	var grp_ids: Array = _building_group()      # кольца вокруг остальных зданий группы
+	for i in maxi(_group_rings.size(), grp_ids.size() - 1):
+		if i >= _group_rings.size():
+			var gr: Node3D = _sel_ring.duplicate()
+			add_child(gr)
+			_group_rings.append(gr)
+		var gring: Node3D = _group_rings[i]
+		gring.visible = i + 1 < grp_ids.size()
+		if gring.visible:
+			var gb: Dictionary = sim.buildings[grp_ids[i + 1]]
+			gring.position = _at(gb["pos"], 0.15)
+			gring.scale = Vector3(float(gb["size"]) * 0.78, 0.25, float(gb["size"]) * 0.78)
+	if not _sel_ring.visible and String(_subject()["kind"]) == "resource":      # выбранный рудник
+		var sr: Dictionary = sim.resources[sel_res]
+		_sel_ring.visible = true
+		_sel_ring.position = _at(sr["pos"], 0.15)
+		_sel_ring.scale = Vector3(float(sr["size"]) * 0.85, 0.25, float(sr["size"]) * 0.85)
 	_range_ring.visible = not _casting.is_empty() and sim.units.has(_casting.get("unit", -1))
 	if _range_ring.visible:
 		var r: float = float(_casting["ability"]["range"]) + float(sim.units[_casting["unit"]]["radius"])
@@ -4057,7 +4363,7 @@ func _update_views(delta: float) -> void:
 
 
 func _update_projectiles() -> void:
-	var alpha := _acc / Sim.TICK_DT
+	var alpha := _alpha()
 	for id in pviews.keys():
 		if not sim.projectiles.has(id):
 			(pviews[id] as Node3D).queue_free()
@@ -4146,9 +4452,16 @@ func _update_hud(delta: float) -> void:
 				create_tween().tween_property(lab, "modulate", Color.WHITE, 0.35)
 			_shown_res[k] = int(p[k])
 			lab.text = str(int(p[k]))
-	var capped: bool = int(p["supply_used"]) >= int(p["supply_cap"])
-	_res_labels["supply"].text = "%d/%d" % [p["supply_used"], p["supply_cap"]]
+	var smax := sim.supply_max(local_player)
+	var capped: bool = int(p["supply_used"]) >= smax
+	_res_labels["supply"].text = "%d/%d" % [p["supply_used"], smax]
+	var stip := "Пища: занято %d из %d.\nПредел пищи — %d" % [int(p["supply_used"]), smax, sim.supply_limit(local_player)]
+	if sim.supply_limit(local_player) < Sim.SUPPLY_TOP:
+		stip += " (поднимается улучшением «Большие амбары» в главном здании)"
+	if _res_labels["supply"].tooltip_text != stip:
+		_res_labels["supply"].tooltip_text = stip
 	_res_labels["supply"].add_theme_color_override("font_color", Color("#ff7a6a") if capped else Color.WHITE)
+	_update_pbuffs()
 	_fps.visible = settings["show_fps"]
 	_fps_time -= delta
 	if _fps.visible and _fps_time <= 0.0:      # обновляем дважды в секунду, чтобы цифры не мельтешили
@@ -4381,7 +4694,7 @@ func _update_ghost() -> void:
 	if hit == null:
 		return
 	_ghost_cell = Vector2i(roundi(hit.x - s * 0.5), roundi(hit.z - s * 0.5))
-	var ok := sim.can_place(s, _ghost_cell) and sim.can_afford(local_player, def.get("cost", {}))
+	var ok := sim.can_place(s, _ghost_cell) and sim.can_afford(local_player, sim.build_cost(local_player, _placing))
 	if String(def.get("role", "")) == "hall" and not sim.hall_spot_ok(_ghost_cell, s):
 		ok = false      # слишком близко к руднику
 		_hint.text = "Главное здание нельзя ставить вплотную к руднику — отступите на %d клетки" % Sim.HALL_MINE_GAP
@@ -4928,7 +5241,7 @@ func _show_ping(index: int, pos: Vector2) -> void:
 func _update_daylight() -> void:
 	if _sun == null:
 		return
-	var t := float(sim.tick % Sim.DAY_CYCLE) + _acc / Sim.TICK_DT
+	var t := float(sim.tick % Sim.DAY_CYCLE) + _alpha()
 	var n := smoothstep(Sim.DAY_LEN - 200.0, Sim.DAY_LEN, t) - smoothstep(Sim.DAY_CYCLE - 200.0, Sim.DAY_CYCLE, t)
 	_sun_night = n
 	# свет и часы трогаем, только когда что-то заметно изменилось (обычно — раз в секунду, а не каждый кадр)
@@ -5056,7 +5369,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				if target < 0:
 					var ob := _building_under(mb.position, g)
 					target = ob if ob != sel_building else -1
-				_issue({"type": "rally", "player": local_player, "building": sel_building, "pos": g, "target": target})
+				for rb in _building_group():      # точка сбора — для всех выбранных зданий
+					_issue({"type": "rally", "player": local_player, "building": rb, "pos": g, "target": target if target != rb else -1})
 				if target >= 0:
 					_mark_entity(target, Color("#ff3a2a") if sim.entity(target) != null and sim.enemies(int(sim.entity(target)["player"]), local_player) else Color("#3cff5a"))
 				else:
@@ -5295,11 +5609,19 @@ func _resource_at(screen: Vector2, ground: Vector2) -> int:
 	var best_d := 30.0
 	var from := _cam.project_ray_origin(screen)
 	var dir := _cam.project_ray_normal(screen)
-	for id in sim.resources:      # рудник — высокий: попадание по его объёму, как у зданий
-		var gm: Dictionary = sim.resources[id]
-		if String(gm["kind"]) == "gold" and rviews.has(id) and _box_hit(rviews[id], Vector2(gm["cell"]), float(gm["size"]), from, dir) >= 0.0:
+	for id in _gold_ids:      # рудник — высокий: попадание по его объёму, как у зданий
+		var gm = sim.resources.get(id)
+		if gm != null and rviews.has(id) and _box_hit(rviews[id], Vector2(gm["cell"]), float(gm["size"]), from, dir) >= 0.0:
 			return int(id)
-	for id in sim.resources:
+	# дальше — только клетки рядом с точкой под курсором (деревьев на карте тысячи)
+	var near: Array = []
+	var c0 := Vector2i(floori(ground.x), floori(ground.y))
+	for dy in range(-6, 7):
+		for dx in range(-6, 7):
+			var cid = _res_cell.get(c0 + Vector2i(dx, dy))
+			if cid != null and not near.has(cid) and sim.resources.has(cid):
+				near.append(cid)
+	for id in near:
 		var r: Dictionary = sim.resources[id]
 		var pos: Vector2 = r["pos"]
 		if pos.distance_to(ground) > 6.0:
@@ -5327,6 +5649,7 @@ func _select(rect: Rect2, add: bool) -> void:
 		selected.clear()
 	sel_building = -1
 	inspect = -1
+	sel_res = -1
 	var before := selected.size()
 	if rect.size.length() > 12.0:      # рамка: все свои юниты внутри
 		for id in views:
@@ -5362,6 +5685,24 @@ func _select(rect: Rect2, add: bool) -> void:
 		var b := _building_under(rect.position, Vector2(hit.x, hit.z) if hit != null else Vector2(-99, -99))
 		if b >= 0 and _building_seen(sim.buildings[b]):
 			sel_building = b
+			sel_group = [b]
+			if _double and int(sim.buildings[b]["player"]) == local_player:      # двойной щелчок: все такие же свои здания на экране
+				var screen := Rect2(Vector2.ZERO, get_viewport().get_visible_rect().size)
+				var bids: Array = sim.buildings.keys()
+				bids.sort()
+				for id in bids:
+					var ob: Dictionary = sim.buildings[id]
+					if int(id) == b or int(ob["player"]) != local_player or String(ob["key"]) != String(sim.buildings[b]["key"]):
+						continue
+					var bp := _at(ob["pos"])
+					if not _cam.is_position_behind(bp) and screen.has_point(_cam.unproject_position(bp)):
+						sel_group.append(int(id))
+		elif hit != null:      # щелчок по руднику: видно, сколько в нём золота
+			for rid in sim.resources:
+				var r: Dictionary = sim.resources[rid]
+				if String(r["kind"]) == "gold" and Rect2(Vector2(r["cell"]), Vector2(r["size"], r["size"])).grow(0.4).has_point(Vector2(hit.x, hit.z)):
+					sel_res = int(rid)
+					break
 
 
 func _ground_point(screen: Vector2):

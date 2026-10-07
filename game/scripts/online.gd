@@ -20,7 +20,7 @@ signal chat(index, nick, text, allies_only)   # index — номер игрок�
 signal pinged(index, pos)                     # союзник отметил точку на карте
 
 const DEFAULT_PORT := 24600
-const VERSION := "этап 25"        # меняется с каждым обновлением игры: разные версии вместе не играют
+const VERSION := "этап 27"        # меняется с каждым обновлением игры: разные версии вместе не играют
 const ACCOUNTS := "user://accounts.json"
 const MAX_SLOTS := 8
 const MAX_TEAMS := 4
