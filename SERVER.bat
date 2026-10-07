@@ -14,5 +14,5 @@ echo Addresses of this computer (Radmin VPN address starts with 26.):
 for /f "tokens=2 delims=:" %%a in ('"%SYS%\ipconfig.exe" ^| "%SYS%\findstr.exe" /c:"IPv4"') do echo    %%a
 echo Game port 24600. Close this window to stop the server.
 "%SYS%\chcp.com" 65001 >nul
-"engine\Godot_v4.6-stable_win64_console.exe" --headless --path game -- --server %*
+"engine\Godot_v4.6-stable_win64_console.exe" --headless --main-pack "%~dp0game.pck" -- --server %*
 pause
