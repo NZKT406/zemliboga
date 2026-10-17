@@ -1,0 +1,105 @@
+{
+	"_about": "Новости для игроков — их показывает лаунчер (страница «Новости»). PUBLISH.bat кладёт этот файл рядом с игрой. Новые записи — сверху, последние ~15. К каждому готовому этапу — 3–8 пунктов простым языком на RU и EN, только то, что уже есть в игре, без внутренних слов (тик, sim, C2, Tripo). version — как Online.VERSION («этап 47»), date — день публикации (ГГГГ-ММ-ДД).",
+	"news": [
+		{
+			"version": "этап 47",
+			"date": "2026-10-17",
+			"title_ru": "Новые модели, пейзаж и лаунчер",
+			"title_en": "New models, landscape and launcher",
+			"items_ru": [
+				"Новые модели всех семи рас: здания, герои, бойцы, звери, машины и нейтралы, у героев — своё оружие.",
+				"Пейзаж как на фоне меню: глубокая зелень, гранёная земля, новые деревья и камни, холмы и обрывы.",
+				"Зимы больше нет, местность выбирается случайно. На вулкане строить нельзя.",
+				"Новый золотой рудник: четыре входа, рабочие заходят только через них и не толпятся.",
+				"Главные здания крупнее и заметнее, у наг — свой герб с трезубцем.",
+				"События мира реже: примерно пять за час, без потока сообщений.",
+				"Баланс: у Надгробного стража альвов 1200 здоровья, герои на 20% дороже, Огр-огнежор бьёт сильнее.",
+				"Новые шрифты, тексты проще, подробности — под значком «?». Новый лаунчер: новости, настройки, помощь."
+			],
+			"items_en": [
+				"New models for all seven races: buildings, heroes, soldiers, beasts, machines and neutrals; heroes carry their own weapons.",
+				"The landscape looks like the menu art: deep greens, faceted ground, new trees and rocks, hills and cliffs.",
+				"Winter is gone, the terrain is picked at random. You can no longer build on the volcano.",
+				"A new gold mine with four entrances: workers go in only through them and do not crowd.",
+				"Main halls are bigger and easier to spot; the nagas got their own trident emblem.",
+				"World events are rarer: about five per hour, no flood of messages.",
+				"Balance: the Duskborn Headstone Guard has 1200 health, heroes cost 20% more, the Ogre Fire-Eater hits harder.",
+				"New fonts, simpler texts, details under the «?» mark. A new launcher with news, settings and help."
+			]
+		},
+		{
+			"version": "этап 46",
+			"date": "2026-10-14",
+			"title_ru": "Панель на месте, сохранения надёжнее",
+			"title_en": "A steady panel and safer saves",
+			"items_ru": [
+				"Нижняя панель больше не прыгает и не меняет размер.",
+				"Названия зданий общие у всех рас: Казарма, Кузница и другие. Свои — только главное здание и дом.",
+				"Способности героев: 16 замен, яд, честное лечение, цепная молния.",
+				"Сохранение записывается целиком, повреждённое не загружается.",
+				"Выработанный рудник даёт немного золота без конца, на картах 96–192 золота больше.",
+				"Камешки и кусты — только вид: они не мешают ходить и строить.",
+				"Мародёры приходят только на брошенную базу.",
+				"Журнал партии и режим плейтеста — в настройках, вкладка «Интерфейс»."
+			],
+			"items_en": [
+				"The bottom panel no longer jumps or changes size.",
+				"Building names are shared by all races: Barracks, Forge and others. Only the main hall and the house keep race names.",
+				"Hero abilities: 16 replaced, poison, fair healing, chain lightning.",
+				"Saves are written whole; a damaged save does not load.",
+				"A depleted mine still gives a little gold forever; maps 96–192 have more gold.",
+				"Pebbles and bushes are only decoration: they do not block walking or building.",
+				"Marauders come only to an abandoned base.",
+				"Match journal and playtest mode are in Settings, the Interface tab."
+			]
+		},
+		{
+			"version": "этап 45",
+			"date": "2026-10-13",
+			"title_ru": "Стены, ценное войско, укрытие рабочих",
+			"title_en": "Walls, a valuable army, worker shelter",
+			"items_ru": [
+				"Стены и ворота у всех рас, стены можно вести под любым углом. Новая смотровая вышка.",
+				"Своё здание можно разобрать: вернётся 75% цены.",
+				"Бойцы дороже и нанимаются дольше — армии меньше, каждый боец ценнее.",
+				"Дерево идёт на стройку, золото — на развитие, железо — на оружие и доспехи.",
+				"При набеге рабочие прячутся в главном здании, храм лечит войско.",
+				"Бойцы бьют ближайшего врага, а не лучника за спинами.",
+				"Предметы на земле со временем исчезают, цвет подписи — по ценности."
+			],
+			"items_en": [
+				"Walls and gates for every race; walls can run at any angle. A new Watch Post.",
+				"You can dismantle your own building and get 75% of its price back.",
+				"Soldiers cost more and train longer: armies are smaller, every soldier matters.",
+				"Wood goes to building, gold to development, iron to weapons and armor.",
+				"During a raid workers hide in the main hall; the temple heals the army.",
+				"Soldiers hit the nearest enemy, not the archer behind the lines.",
+				"Items on the ground vanish over time; the label color shows their value."
+			]
+		},
+		{
+			"version": "этап 44",
+			"date": "2026-10-12",
+			"title_ru": "Рисованные значки и «Расы v2»",
+			"title_en": "Painted icons and Races v2",
+			"items_ru": [
+				"Все значки игры — новые рисованные.",
+				"Правило «Расы v2»: расы различаются устройством, элита сильнее и чуть дороже.",
+				"Где часто ходят, протаптываются тропы.",
+				"Плавильня плавит сама, рабочие с рудой сдают её туда.",
+				"Бойцы обступают цель со всех сторон, лишние ждут во втором ряду.",
+				"Рамки панелей в стиле расы, «Помощник» по хозяйству — F8.",
+				"Щелчок выбирает по самой модели, а не по кругу под ней."
+			],
+			"items_en": [
+				"All game icons are new painted ones.",
+				"The Races v2 rule: races differ in how they work, elites are stronger and a bit pricier.",
+				"Trails appear where units walk often.",
+				"The smelter smelts by itself; workers bring ore straight to it.",
+				"Soldiers surround the target from all sides; extra ones wait in a second row.",
+				"Panel frames in race style; the economy Helper is on F8.",
+				"A click selects by the model itself, not by the circle under it."
+			]
+		}
+	]
+}
